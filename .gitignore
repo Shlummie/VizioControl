@@ -1,0 +1,15 @@
+node_modules/
+dist/
+dist-electron/
+release/
+output/
+coverage/
+.playwright-cli/
+.tmp-codex-config/
+.impeccable/
+*.log
+*.pid
+.DS_Store
+.env
+.env.*
+!.env.example
