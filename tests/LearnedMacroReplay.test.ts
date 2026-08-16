@@ -77,11 +77,11 @@ function readyState(): TvState {
 
 function pairedDevice(): PairedDevice {
   return {
-    id: 'c8599ce74c872bfd',
-    name: 'LIVING ROOM TV',
+    id: '1111222233334444',
+    name: 'TV',
     address: '192.168.50.42',
     model: 'TEST-MODEL',
-    serial: '14LINID4PZ06139',
+    serial: 'SERIAL-1',
     fingerprint: 'AA:BB',
     macAddress: '02:11:22:33:44:55',
     deviceId: 'client-id',

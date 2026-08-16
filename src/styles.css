@@ -362,6 +362,7 @@ h3 { font-size: 14px; line-height: 1.3; }
 }
 .control-button:hover:not(:disabled), .icon-control:hover:not(:disabled), .text-control:hover:not(:disabled), .dpad button:hover:not(:disabled) { background: #2d322c; }
 .control-button:active:not(:disabled), .icon-control:active:not(:disabled), .text-control:active:not(:disabled), .dpad button:active:not(:disabled) { background: var(--surface-pressed); box-shadow: inset 0 3px 8px rgba(0, 0, 0, .52); transform: translateY(1px); }
+.control-button, .icon-control, .mute-button, .dpad button { touch-action: manipulation; }
 
 .manual-main { display: grid; grid-template-columns: 290px minmax(0, 1fr); gap: 18px; align-items: stretch; padding-top: 14px; }
 

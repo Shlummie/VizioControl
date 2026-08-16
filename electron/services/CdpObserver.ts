@@ -40,6 +40,7 @@ const DEFAULT_PORT_SCAN: PortScanOptions = { start: 32768, end: 49151, concurren
 const STREAM_RETRY_MS = 2500;
 const FULL_SCAN_COOLDOWN_MS = 10_000;
 const MAX_STREAM_FRAME_BASE64 = 2 * 1024 * 1024;
+const STREAM_SOURCE_FRAME_DIVISOR = 2;
 
 export interface CdpStreamFrame {
   dataUrl: string;
@@ -342,7 +343,11 @@ export class CdpObserver extends EventEmitter {
           quality: 60,
           maxWidth: 1280,
           maxHeight: 720,
-          everyNthFrame: 1,
+          // SmartCast commonly renders at 60 FPS. Requesting every frame made
+          // the TV encode roughly twice as many JPEGs as the 24 FPS viewport
+          // could display, stealing time from remote commands. Thirty source
+          // frames still sustain a true 24 FPS output without that excess.
+          everyNthFrame: STREAM_SOURCE_FRAME_DIVISOR,
         }, signal);
         this.cachedPort = port;
         this.emit('streamState', { status: 'live', title: this.streamTitle } satisfies CdpStreamState);

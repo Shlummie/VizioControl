@@ -100,7 +100,7 @@ function createTray() {
   tray.setToolTip('VizioControl');
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: 'Open VizioControl', click: () => showWindow() },
-    { label: 'Reconnect TV', click: () => void controller.refreshTvState() },
+    { label: 'Connect to TV', click: () => void controller.refreshTvState() },
     { label: 'Pause Luna navigator', click: () => void controller.cancelAgent() },
     { type: 'separator' },
     { label: 'Exit', click: () => { quitting = true; app.quit(); } },

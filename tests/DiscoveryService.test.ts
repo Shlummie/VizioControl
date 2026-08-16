@@ -10,7 +10,7 @@ Interface: 192.168.50.110 --- 0x13
   192.168.50.42          02-11-22-33-44-55     dynamic
 `;
     expect(parseArpMac(output, '192.168.50.42')).toBe('02:11:22:33:44:55');
-    expect(parseArpMac(output, '192.168.50.93')).toBeUndefined();
+    expect(parseArpMac(output, '192.168.50.43')).toBeUndefined();
   });
 
   it('rejects malformed addresses and multicast results', () => {

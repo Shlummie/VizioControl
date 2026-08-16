@@ -24,18 +24,18 @@ describe('DHCP identity matching', () => {
   });
 
   it('rejects a different Vizio that reuses TV\'s TLS certificate', () => {
-    const backyard: DeviceCandidate = {
-      id: 'backyard-id',
-      name: 'Backyard',
+    const secondary: DeviceCandidate = {
+      id: 'secondary-id',
+      name: 'Secondary TV',
       address: '192.168.50.114',
-      model: 'D32h-G9',
-      serial: '44LINIXZUW08726',
+      model: 'TEST-MODEL-2',
+      serial: 'SERIAL-2',
       fingerprint: paired.fingerprint,
       macAddress: '02:66:77:88:99:AA',
       source: 'mdns',
     };
 
-    expect(isSameDevice(paired, backyard)).toBe(false);
+    expect(isSameDevice(paired, secondary)).toBe(false);
   });
 
   it('uses the verified MAC when a legacy candidate has no serial', () => {
@@ -53,34 +53,34 @@ describe('DHCP identity matching', () => {
   it('recovers a record whose serial was overwritten by a shared-certificate TV', () => {
     const corrupted: PairedDevice = {
       ...paired,
-      id: 'c8599ce74c872bfd',
+      id: '1111222233334444',
       address: '192.168.50.114',
-      model: 'D32h-G9',
-      serial: '44LINIXZUW08726',
+      model: 'TEST-MODEL-2',
+      serial: 'SERIAL-2',
       macAddress: '02:66:77:88:99:AA',
     };
     const tv: DeviceCandidate = {
-      id: 'c8599ce74c872bfd',
-      name: 'LIVING ROOM TV',
+      id: '1111222233334444',
+      name: 'TV',
       address: '192.168.50.42',
       model: 'TEST-MODEL',
-      serial: '14LINID4PZ06139',
+      serial: 'SERIAL-1',
       fingerprint: corrupted.fingerprint,
       macAddress: '02:11:22:33:44:55',
       source: 'mdns',
     };
-    const backyard: DeviceCandidate = {
-      id: 'bb2d24b4a982bf02',
-      name: 'Backyard',
+    const secondary: DeviceCandidate = {
+      id: 'aaaabbbbccccdddd',
+      name: 'Secondary TV',
       address: '192.168.50.114',
-      model: 'D32h-G9',
-      serial: '44LINIXZUW08726',
+      model: 'TEST-MODEL-2',
+      serial: 'SERIAL-2',
       fingerprint: corrupted.fingerprint,
       macAddress: '02:66:77:88:99:AA',
       source: 'cached',
     };
 
-    expect(isSameDevice(corrupted, backyard)).toBe(false);
+    expect(isSameDevice(corrupted, secondary)).toBe(false);
     expect(isSameDevice(corrupted, tv)).toBe(true);
   });
 });

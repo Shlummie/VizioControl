@@ -72,6 +72,27 @@ describe('fast manual controls', () => {
     expect(optimisticTvStateForKey(readyState(), 'volumeDown', 3)).toMatchObject({ volume: 47, muted: false });
   });
 
+  it('accumulates optimistic state when rapid controls complete together', async () => {
+    const controller = new RemoteController(directory);
+    await controller.store.load();
+    await controller.store.setDevice(pairedDevice());
+    const gate = deferred<void>();
+    const internals = controller as unknown as {
+      tvState: TvState;
+      tv: { pressKey: ReturnType<typeof vi.fn> };
+    };
+    internals.tvState = readyState();
+    internals.tv.pressKey = vi.fn(() => gate.promise);
+
+    const first = controller.pressKey('volumeUp');
+    const second = controller.pressKey('volumeUp');
+    gate.resolve();
+    await Promise.all([first, second]);
+
+    expect(internals.tvState.volume).toBe(52);
+    await controller.shutdown();
+  });
+
   it('retains the wake path when the cached state is offline', async () => {
     const controller = new RemoteController(directory);
     await controller.store.load();
@@ -174,14 +195,20 @@ function readyState(): TvState {
 
 function pairedDevice(): PairedDevice {
   return {
-    id: 'c8599ce74c872bfd',
-    name: 'LIVING ROOM TV',
+    id: '1111222233334444',
+    name: 'TV',
     address: '192.168.50.42',
     model: 'TEST-MODEL',
-    serial: '14LINID4PZ06139',
+    serial: 'SERIAL-1',
     fingerprint: 'AA:BB',
     macAddress: '02:11:22:33:44:55',
     deviceId: 'client-id',
     pairedAt: '2026-08-13T00:00:00.000Z',
   };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((complete) => { resolve = complete; });
+  return { promise, resolve };
 }

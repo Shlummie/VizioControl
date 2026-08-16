@@ -287,7 +287,11 @@ export class RemoteController extends EventEmitter {
       this.scheduleStateRefresh(0);
       throw error;
     }
-    state = optimisticTvStateForKey(state, actualKey, count);
+    // Several rapid renderer calls can share one SmartCast KEYLIST response.
+    // Apply each completion to the latest optimistic state so repeated volume
+    // or mute presses accumulate instead of all restarting from the same
+    // pre-batch snapshot.
+    state = optimisticTvStateForKey(this.tvState.connected ? this.tvState : state, actualKey, count);
     this.tvState = state;
     this.emit('tv', state);
     const refreshDelay = stateRefreshDelayForKey(actualKey);

@@ -33,6 +33,19 @@ interface KeyCode {
   code: number;
 }
 
+interface PendingKeyRequest {
+  keys: TvKey[];
+  timeoutMs: number;
+  batchable: boolean;
+  resolve: () => void;
+  reject: (reason?: unknown) => void;
+}
+
+interface PendingVolumeRequest {
+  value: number;
+  waiters: Array<{ resolve: () => void; reject: (reason?: unknown) => void }>;
+}
+
 export const KEY_CODES: Record<TvKey, KeyCode> = {
   powerOff: { codeset: 11, code: 0 },
   powerOn: { codeset: 11, code: 1 },
@@ -122,7 +135,10 @@ export class SmartCastClient {
   private token: string | null = null;
   private expectedFingerprint: string | null = null;
   private expectedSerial: string | null = null;
-  private requestChain = Promise.resolve();
+  private pendingKeys: PendingKeyRequest[] = [];
+  private keyPumpRunning = false;
+  private pendingVolume: PendingVolumeRequest | null = null;
+  private volumePumpRunning = false;
   private readonly requestAgent = new https.Agent({
     keepAlive: true,
     maxSockets: 4,
@@ -267,10 +283,15 @@ export class SmartCastClient {
   async pressKey(key: TvKey, count = 1, timeoutMs = 8000) {
     if (!KEY_CODES[key]) throw new Error(`Unsupported TV key: ${key}`);
     const safeCount = Math.max(1, Math.min(10, Math.floor(count)));
-    return await this.serial(async () => {
-      // SmartCast processes KEYLIST entries sequentially. One batched request
-      // avoids a TLS round trip per repeated press (for example, "down twice").
-      await this.request('/key_command/', 'PUT', keyPayload(key, safeCount), true, timeoutMs);
+    return await new Promise<void>((resolve, reject) => {
+      this.pendingKeys.push({
+        keys: Array.from({ length: safeCount }, () => key),
+        timeoutMs,
+        batchable: !key.startsWith('power'),
+        resolve,
+        reject,
+      });
+      void this.pumpKeyQueue();
     });
   }
 
@@ -310,10 +331,25 @@ export class SmartCastClient {
 
   async setVolume(value: number) {
     const safeValue = Math.max(0, Math.min(100, Math.round(value)));
+    return await new Promise<void>((resolve, reject) => {
+      if (this.pendingVolume) {
+        // Slider movement can produce dozens of values while TV is still
+        // acknowledging the first one. Keep every caller attached to the
+        // result, but send only the newest pending value to the TV.
+        this.pendingVolume.value = safeValue;
+        this.pendingVolume.waiters.push({ resolve, reject });
+      } else {
+        this.pendingVolume = { value: safeValue, waiters: [{ resolve, reject }] };
+      }
+      void this.pumpVolumeQueue();
+    });
+  }
+
+  private async sendVolume(value: number) {
     try {
       // TV firmware supports the modern flat endpoint. It is a single PUT
       // and avoids the legacy GET-for-HASHVAL round trip on every slider move.
-      await this.request('/audio/volume/level', 'PUT', flatVolumePayload(safeValue));
+      await this.request('/audio/volume/level', 'PUT', flatVolumePayload(value));
       return;
     } catch (error) {
       if (!isUnsupportedEndpoint(error)) throw error;
@@ -324,7 +360,7 @@ export class SmartCastClient {
     const item = findMenuItem(current, 'volume');
     const hash = Number(item?.HASHVAL);
     if (!Number.isFinite(hash)) throw new Error('TV did not return the volume control hash.');
-    await this.request('/menu_native/dynamic/tv_settings/audio/volume', 'PUT', volumePayload(hash, safeValue));
+    await this.request('/menu_native/dynamic/tv_settings/audio/volume', 'PUT', volumePayload(hash, value));
   }
 
   async readSetting(setting: TvSettingName): Promise<number | SleepTimerValue> {
@@ -446,10 +482,56 @@ export class SmartCastClient {
     });
   }
 
-  private async serial<T>(operation: () => Promise<T>) {
-    const next = this.requestChain.then(operation, operation);
-    this.requestChain = next.then(() => undefined, () => undefined);
-    return await next;
+  private async pumpKeyQueue() {
+    if (this.keyPumpRunning) return;
+    this.keyPumpRunning = true;
+    try {
+      while (this.pendingKeys.length) {
+        const requests = [this.pendingKeys.shift()!];
+        let keyCount = requests[0].keys.length;
+        if (requests[0].batchable) {
+          while (
+            this.pendingKeys[0]?.batchable
+            && keyCount + this.pendingKeys[0].keys.length <= 10
+          ) {
+            const next = this.pendingKeys.shift()!;
+            requests.push(next);
+            keyCount += next.keys.length;
+          }
+        }
+        try {
+          const keys = requests.flatMap((request) => request.keys);
+          const timeoutMs = Math.max(...requests.map((request) => request.timeoutMs));
+          await this.request('/key_command/', 'PUT', keySequencePayload(keys), true, timeoutMs);
+          requests.forEach((request) => request.resolve());
+        } catch (error) {
+          requests.forEach((request) => request.reject(error));
+        }
+      }
+    } finally {
+      this.keyPumpRunning = false;
+      if (this.pendingKeys.length) void this.pumpKeyQueue();
+    }
+  }
+
+  private async pumpVolumeQueue() {
+    if (this.volumePumpRunning) return;
+    this.volumePumpRunning = true;
+    try {
+      while (this.pendingVolume) {
+        const request = this.pendingVolume;
+        this.pendingVolume = null;
+        try {
+          await this.sendVolume(request.value);
+          request.waiters.forEach((waiter) => waiter.resolve());
+        } catch (error) {
+          request.waiters.forEach((waiter) => waiter.reject(error));
+        }
+      }
+    } finally {
+      this.volumePumpRunning = false;
+      if (this.pendingVolume) void this.pumpVolumeQueue();
+    }
   }
 }
 
@@ -496,15 +578,18 @@ export function flatVolumePayload(value: number) {
 }
 
 export function keyPayload(key: TvKey, count = 1) {
-  const command = KEY_CODES[key];
-  if (!command) throw new Error(`Unsupported TV key: ${key}`);
   const safeCount = Math.max(1, Math.min(10, Math.floor(count)));
+  return keySequencePayload(Array.from({ length: safeCount }, () => key));
+}
+
+export function keySequencePayload(keys: TvKey[]) {
+  if (!keys.length || keys.length > 10) throw new Error('SmartCast key sequences accept 1–10 commands.');
   return {
-    KEYLIST: Array.from({ length: safeCount }, () => ({
-      CODESET: command.codeset,
-      CODE: command.code,
-      ACTION: 'KEYPRESS' as const,
-    })),
+    KEYLIST: keys.map((key) => {
+      const command = KEY_CODES[key];
+      if (!command) throw new Error(`Unsupported TV key: ${key}`);
+      return { CODESET: command.codeset, CODE: command.code, ACTION: 'KEYPRESS' as const };
+    }),
   };
 }
 

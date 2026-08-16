@@ -4,6 +4,7 @@ import {
   appNameFromIdentity,
   flatVolumePayload,
   keyPayload,
+  keySequencePayload,
   pairingFinishPayload,
   pairingStartPayload,
   parseDeviceInfo,
@@ -32,6 +33,13 @@ describe('SmartCast protocol payloads', () => {
       KEYLIST: [
         { CODESET: 3, CODE: 0, ACTION: 'KEYPRESS' },
         { CODESET: 3, CODE: 0, ACTION: 'KEYPRESS' },
+      ],
+    });
+    expect(keySequencePayload(['right', 'down', 'ok'])).toEqual({
+      KEYLIST: [
+        { CODESET: 3, CODE: 7, ACTION: 'KEYPRESS' },
+        { CODESET: 3, CODE: 0, ACTION: 'KEYPRESS' },
+        { CODESET: 3, CODE: 2, ACTION: 'KEYPRESS' },
       ],
     });
   });
@@ -108,6 +116,66 @@ describe('SmartCast protocol payloads', () => {
         { CODESET: 3, CODE: 0, ACTION: 'KEYPRESS' },
       ],
     }, true, 8000);
+  });
+
+  it('coalesces rapid ordered controls waiting behind an in-flight TV response', async () => {
+    const client = new SmartCastClient('192.168.50.42');
+    client.setToken('test-token');
+    const first = deferred<{ STATUS: { RESULT: string } }>();
+    const request = vi.spyOn(client, 'request')
+      .mockImplementationOnce(() => first.promise)
+      .mockResolvedValue({ STATUS: { RESULT: 'SUCCESS' } });
+
+    const right = client.pressKey('right');
+    const down = client.pressKey('down');
+    const left = client.pressKey('left');
+    const ok = client.pressKey('ok');
+    expect(request).toHaveBeenCalledOnce();
+
+    first.resolve({ STATUS: { RESULT: 'SUCCESS' } });
+    await Promise.all([right, down, left, ok]);
+
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(request).toHaveBeenNthCalledWith(2, '/key_command/', 'PUT', keySequencePayload(['down', 'left', 'ok']), true, 8000);
+  });
+
+  it('keeps power commands as standalone ordering barriers', async () => {
+    const client = new SmartCastClient('192.168.50.42');
+    client.setToken('test-token');
+    const first = deferred<{ STATUS: { RESULT: string } }>();
+    const request = vi.spyOn(client, 'request')
+      .mockImplementationOnce(() => first.promise)
+      .mockResolvedValue({ STATUS: { RESULT: 'SUCCESS' } });
+
+    const right = client.pressKey('right');
+    const power = client.pressKey('powerOff');
+    const left = client.pressKey('left');
+    first.resolve({ STATUS: { RESULT: 'SUCCESS' } });
+    await Promise.all([right, power, left]);
+
+    expect(request).toHaveBeenCalledTimes(3);
+    expect(request).toHaveBeenNthCalledWith(2, '/key_command/', 'PUT', keyPayload('powerOff'), true, 8000);
+    expect(request).toHaveBeenNthCalledWith(3, '/key_command/', 'PUT', keyPayload('left'), true, 8000);
+  });
+
+  it('sends only the newest slider value waiting behind an in-flight update', async () => {
+    const client = new SmartCastClient('192.168.50.42');
+    const first = deferred<{ STATUS: { RESULT: string } }>();
+    const request = vi.spyOn(client, 'request')
+      .mockImplementationOnce(() => first.promise)
+      .mockResolvedValue({ STATUS: { RESULT: 'SUCCESS' } });
+
+    const volume20 = client.setVolume(20);
+    const volume35 = client.setVolume(35);
+    const volume48 = client.setVolume(48);
+    expect(request).toHaveBeenCalledOnce();
+
+    first.resolve({ STATUS: { RESULT: 'SUCCESS' } });
+    await Promise.all([volume20, volume35, volume48]);
+
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(request).toHaveBeenNthCalledWith(1, '/audio/volume/level', 'PUT', { LEVEL: 20 });
+    expect(request).toHaveBeenNthCalledWith(2, '/audio/volume/level', 'PUT', { LEVEL: 48 });
   });
 
   it('leaves an already configured Quick Start power mode unchanged', async () => {
@@ -210,14 +278,14 @@ describe('SmartCast protocol payloads', () => {
     const client = new SmartCastClient('192.168.50.114');
     client.configure({
       id: 'tv-id',
-      name: 'LIVING ROOM TV',
+      name: 'TV',
       address: '192.168.50.114',
-      serial: '14LINID4PZ06139',
+      serial: 'SERIAL-1',
       deviceId: 'client-id',
       pairedAt: '2026-08-13T00:00:00.000Z',
     }, null);
     vi.spyOn(client, 'getDeviceInfo').mockResolvedValue({
-      ITEMS: [{ VALUE: { MODEL_NAME: 'D32h-G9', SYSTEM_INFO: { SERIAL_NUMBER: '44LINIXZUW08726' } } }],
+      ITEMS: [{ VALUE: { MODEL_NAME: 'TEST-MODEL-2', SYSTEM_INFO: { SERIAL_NUMBER: 'SERIAL-2' } } }],
     });
     const power = vi.spyOn(client, 'getPower');
 
@@ -228,3 +296,9 @@ describe('SmartCast protocol payloads', () => {
     expect(power).not.toHaveBeenCalled();
   });
 });
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((complete) => { resolve = complete; });
+  return { promise, resolve };
+}

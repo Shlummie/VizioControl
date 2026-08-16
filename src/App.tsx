@@ -1,4 +1,12 @@
-import { useEffect, useRef, useState, type CSSProperties, type FormEvent } from 'react';
+import {
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type FormEvent,
+  type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
+} from 'react';
 import {
   AppWindow,
   ArrowDown,
@@ -230,10 +238,10 @@ export function App() {
                 }, state.tv.power === true ? 'TV is in network standby.' : 'TV is on.')}
                 disabled={commandBusy}
               />
-              <ControlButton label="Input" icon={Cable} onPress={() => manualKey('input')} disabled={localControlsDisabled} />
-              <ControlButton label="Home" icon={House} onPress={() => manualKey('home')} disabled={localControlsDisabled} />
-              <ControlButton label="Back" icon={Undo2} onPress={() => manualKey('back')} disabled={localControlsDisabled} />
-              <ControlButton label="Menu" icon={Menu} onPress={() => manualKey('menu')} disabled={localControlsDisabled} />
+              <ControlButton label="Input" icon={Cable} onPress={() => manualKey('input')} disabled={localControlsDisabled} immediate />
+              <ControlButton label="Home" icon={House} onPress={() => manualKey('home')} disabled={localControlsDisabled} immediate />
+              <ControlButton label="Back" icon={Undo2} onPress={() => manualKey('back')} disabled={localControlsDisabled} immediate />
+              <ControlButton label="Menu" icon={Menu} onPress={() => manualKey('menu')} disabled={localControlsDisabled} immediate />
             </div>
 
             <div className="manual-main">
@@ -242,7 +250,7 @@ export function App() {
                 <VolumeControl
                   tv={state.tv}
                   disabled={localControlsDisabled}
-                  onSet={(value) => void manualVolume(value)}
+                  onSet={(value) => manualVolume(value)}
                   onMute={() => void manualKey('mute')}
                 />
                 <div className="playback-bank" aria-label="Playback controls">
@@ -683,30 +691,62 @@ function TimelineItem({ event }: { event: AgentEvent }) {
 function DPad({ disabled, onPress }: { disabled: boolean; onPress: (key: TvKey) => void }) {
   return (
     <div className="dpad" aria-label="Directional controls">
-      <button type="button" className="dpad-up" disabled={disabled} onClick={() => onPress('up')} aria-label="Up"><ChevronUp size={32} /></button>
-      <button type="button" className="dpad-left" disabled={disabled} onClick={() => onPress('left')} aria-label="Left"><ChevronLeft size={32} /></button>
-      <button type="button" className="dpad-ok" disabled={disabled} onClick={() => onPress('ok')}>OK</button>
-      <button type="button" className="dpad-right" disabled={disabled} onClick={() => onPress('right')} aria-label="Right"><ChevronRight size={32} /></button>
-      <button type="button" className="dpad-down" disabled={disabled} onClick={() => onPress('down')} aria-label="Down"><ChevronDown size={32} /></button>
+      <button type="button" className="dpad-up" disabled={disabled} {...immediatePressHandlers(() => onPress('up'))} aria-label="Up"><ChevronUp size={32} /></button>
+      <button type="button" className="dpad-left" disabled={disabled} {...immediatePressHandlers(() => onPress('left'))} aria-label="Left"><ChevronLeft size={32} /></button>
+      <button type="button" className="dpad-ok" disabled={disabled} {...immediatePressHandlers(() => onPress('ok'))}>OK</button>
+      <button type="button" className="dpad-right" disabled={disabled} {...immediatePressHandlers(() => onPress('right'))} aria-label="Right"><ChevronRight size={32} /></button>
+      <button type="button" className="dpad-down" disabled={disabled} {...immediatePressHandlers(() => onPress('down'))} aria-label="Down"><ChevronDown size={32} /></button>
     </div>
   );
 }
 
-function VolumeControl({ tv, disabled, onSet, onMute }: { tv: TvState; disabled: boolean; onSet: (value: number) => void; onMute: () => void }) {
+function VolumeControl({ tv, disabled, onSet, onMute }: { tv: TvState; disabled: boolean; onSet: (value: number) => Promise<unknown>; onMute: () => void }) {
   const [value, setValue] = useState(tv.volume ?? 30);
   const latest = useRef(value);
+  const lastSent = useRef<number | null>(tv.volume);
+  const localRequestVersion = useRef(0);
+  const localRequestPending = useRef(false);
+  const pendingFrame = useRef<number | null>(null);
+  const onSetRef = useRef(onSet);
+  onSetRef.current = onSet;
   useEffect(() => {
     if (tv.volume !== null) {
+      if (localRequestPending.current && tv.volume !== lastSent.current) return;
       setValue(tv.volume);
       latest.current = tv.volume;
+      lastSent.current = tv.volume;
     }
   }, [tv.volume]);
-  const commit = () => onSet(latest.current);
+  useEffect(() => () => {
+    if (pendingFrame.current !== null) cancelAnimationFrame(pendingFrame.current);
+  }, []);
+  const dispatchLatest = () => {
+    const next = latest.current;
+    if (lastSent.current === next) return;
+    lastSent.current = next;
+    localRequestPending.current = true;
+    const version = ++localRequestVersion.current;
+    void onSetRef.current(next).finally(() => {
+      if (version === localRequestVersion.current) localRequestPending.current = false;
+    });
+  };
+  const schedule = () => {
+    if (pendingFrame.current !== null) return;
+    pendingFrame.current = requestAnimationFrame(() => {
+      pendingFrame.current = null;
+      dispatchLatest();
+    });
+  };
+  const commit = () => {
+    if (pendingFrame.current !== null) cancelAnimationFrame(pendingFrame.current);
+    pendingFrame.current = null;
+    dispatchLatest();
+  };
   return (
     <div className="volume-bank">
       <div className="volume-label"><span>Volume</span><output htmlFor="volume-slider">{value}</output></div>
       <div className="volume-row">
-        <button type="button" className={`mute-button ${tv.muted ? 'active' : ''}`} onClick={onMute} disabled={disabled} aria-label={tv.muted ? 'Unmute' : 'Mute'}>
+        <button type="button" className={`mute-button ${tv.muted ? 'active' : ''}`} {...immediatePressHandlers(onMute)} disabled={disabled} aria-label={tv.muted ? 'Unmute' : 'Mute'}>
           {tv.muted ? <VolumeX size={23} /> : <Volume2 size={23} />}
         </button>
         <input
@@ -722,8 +762,11 @@ function VolumeControl({ tv, disabled, onSet, onMute }: { tv: TvState; disabled:
             const next = Number(event.target.value);
             latest.current = next;
             setValue(next);
+            schedule();
           }}
           onPointerUp={commit}
+          onPointerCancel={commit}
+          onBlur={commit}
           onKeyUp={(event) => { if (['ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown'].includes(event.key)) commit(); }}
         />
       </div>
@@ -990,12 +1033,27 @@ function ButtonEditor({ button, onClose, onSave, onMove, onDuplicate, onDelete }
   );
 }
 
-function ControlButton({ label, icon: Icon, onPress, disabled }: { label: string; icon: LucideIcon; onPress: () => Promise<unknown>; disabled: boolean }) {
-  return <button type="button" className="control-button" disabled={disabled} onClick={() => void onPress()} aria-label={label}><Icon size={20} /><span>{label}</span></button>;
+function ControlButton({ label, icon: Icon, onPress, disabled, immediate = false }: { label: string; icon: LucideIcon; onPress: () => Promise<unknown>; disabled: boolean; immediate?: boolean }) {
+  const activate = () => void onPress();
+  return <button type="button" className="control-button" disabled={disabled} {...(immediate ? immediatePressHandlers(activate) : { onClick: activate })} aria-label={label}><Icon size={20} /><span>{label}</span></button>;
 }
 
 function IconControl({ label, icon: Icon, onPress, disabled }: { label: string; icon: LucideIcon; onPress: () => Promise<unknown>; disabled: boolean }) {
-  return <button type="button" className="icon-control" disabled={disabled} onClick={() => void onPress()} aria-label={label} title={label}><Icon size={23} /></button>;
+  const activate = () => void onPress();
+  return <button type="button" className="icon-control" disabled={disabled} {...immediatePressHandlers(activate)} aria-label={label} title={label}><Icon size={23} /></button>;
+}
+
+function immediatePressHandlers(onPress: () => void) {
+  return {
+    onPointerDown: (event: ReactPointerEvent<HTMLButtonElement>) => {
+      if (event.button === 0 && !event.currentTarget.disabled) onPress();
+    },
+    // Keyboard and assistive-technology activation produces a click with no
+    // pointer click count. Pointer clicks already dispatched on press-down.
+    onClick: (event: ReactMouseEvent<HTMLButtonElement>) => {
+      if (event.detail === 0 && !event.currentTarget.disabled) onPress();
+    },
+  };
 }
 
 function ToggleRow({ label, detail, checked, onChange }: { label: string; detail: string; checked: boolean; onChange: (value: boolean) => void }) {

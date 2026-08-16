@@ -104,6 +104,13 @@ describe('SmartCast Chromium observation', () => {
     expect(frames.length).toBeGreaterThanOrEqual(8);
     expect(frames.length).toBeLessThanOrEqual(15);
     expect(frames.every((frame) => frame.dataUrl.startsWith('data:image/jpeg;base64,'))).toBe(true);
+    expect(cdp.screencastOptions()).toMatchObject({
+      format: 'jpeg',
+      quality: 60,
+      maxWidth: 1280,
+      maxHeight: 720,
+      everyNthFrame: 2,
+    });
     expect(cdp.frameCount()).toBeGreaterThan(frames.length * 2);
     expect(cdp.ackCount()).toBeGreaterThan(frames.length * 2);
   });
@@ -166,6 +173,7 @@ async function startCdp(port: number, title: string) {
   const sockets = new Set<net.Socket>();
   let acknowledgements = 0;
   let generatedFrames = 0;
+  let screencastOptions: Record<string, unknown> | null = null;
   const server = http.createServer((request, response) => {
     if (request.url !== '/json/list') {
       response.writeHead(404).end();
@@ -191,7 +199,7 @@ async function startCdp(port: number, title: string) {
     };
     client.once('close', stopFrames);
     client.on('message', (raw) => {
-      const command = JSON.parse(raw.toString()) as { id: number; method: string };
+      const command = JSON.parse(raw.toString()) as { id: number; method: string; params?: Record<string, unknown> };
       if (command.method === 'Page.screencastFrameAck') acknowledgements += 1;
       const result = command.method === 'Page.captureScreenshot'
         ? { data: Buffer.from('private-screen').toString('base64') }
@@ -205,6 +213,7 @@ async function startCdp(port: number, title: string) {
           : {};
       client.send(JSON.stringify({ id: command.id, result }));
       if (command.method === 'Page.startScreencast' && !frameTimer) {
+        screencastOptions = command.params ?? null;
         frameTimer = setInterval(() => {
           generatedFrames += 1;
           client.send(JSON.stringify({
@@ -224,6 +233,7 @@ async function startCdp(port: number, title: string) {
   return {
     ackCount: () => acknowledgements,
     frameCount: () => generatedFrames,
+    screencastOptions: () => screencastOptions,
     close: async () => {
       if (closed) return;
       closed = true;
