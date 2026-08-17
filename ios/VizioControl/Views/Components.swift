@@ -41,9 +41,10 @@ struct AsyncActionButton: View {
         Button(role: kind == .danger ? .destructive : nil) {
             guard !isRunning else { return }
             isRunning = true
-            Task { @MainActor in
-                defer { isRunning = false }
-                do { try await action() } catch { }
+            if #available(iOS 26, *) {
+                Task.immediate { @MainActor in await runAction() }
+            } else {
+                Task { @MainActor in await runAction() }
             }
         } label: {
             HStack(spacing: 8) {
@@ -61,6 +62,12 @@ struct AsyncActionButton: View {
                 }
             }
         }
+    }
+
+    @MainActor
+    private func runAction() async {
+        defer { isRunning = false }
+        do { try await action() } catch { }
     }
 }
 
