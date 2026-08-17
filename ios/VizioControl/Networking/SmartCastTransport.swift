@@ -271,24 +271,14 @@ private final class URLSessionDeadlineOperation: @unchecked Sendable {
                             deadline.cancel()
                             return
                         }
+                        task.resume()
                     } else {
-                        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .userInitiated))
-                        timer.schedule(deadline: .now() + dispatchDeadlineInterval(timeout))
-                        timer.setEventHandler {
-                            reference.value.deadlineReached()
+                        let deadline = DispatchTime.now() + dispatchDeadlineInterval(timeout)
+                        DispatchQueue.global(qos: .userInitiated).async {
+                            reference.value.installDeadlineTimer(deadline: deadline)
                         }
-                        timer.resume()
-                        let completedBeforeDeadlineStarted = lock.withLock {
-                            if settled { return true }
-                            deadlineTimer = timer
-                            return false
-                        }
-                        if completedBeforeDeadlineStarted {
-                            timer.cancel()
-                            return
-                        }
+                        task.resume()
                     }
-                    task.resume()
                 }
             } onCancel: {
                 self.cancel()
@@ -298,6 +288,24 @@ private final class URLSessionDeadlineOperation: @unchecked Sendable {
         } catch {
             await finishDeadlineWork()
             throw error
+        }
+    }
+
+    private func installDeadlineTimer(deadline: DispatchTime) {
+        let reference = UnsafeSendableReference(value: self)
+        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .userInitiated))
+        timer.schedule(deadline: deadline)
+        timer.setEventHandler {
+            reference.value.deadlineReached()
+        }
+        timer.resume()
+        let completedBeforeDeadlineStarted = lock.withLock {
+            if settled { return true }
+            deadlineTimer = timer
+            return false
+        }
+        if completedBeforeDeadlineStarted {
+            timer.cancel()
         }
     }
 
