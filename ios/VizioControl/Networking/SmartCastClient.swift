@@ -307,18 +307,30 @@ public actor SmartCastClient: SmartCastControlling {
 
     public func setVolume(_ value: Double) async throws -> Int {
         let safeValue = min(100, max(0, Int(value.rounded())))
-        return try await withCheckedThrowingContinuation { continuation in
-            if pendingVolume == nil {
-                pendingVolume = PendingVolumeRequest(value: safeValue, waiters: [continuation])
-            } else {
-                pendingVolume?.value = safeValue
-                pendingVolume?.waiters.append(continuation)
+        if volumePumpRunning {
+            return try await withCheckedThrowingContinuation { continuation in
+                if pendingVolume == nil {
+                    pendingVolume = PendingVolumeRequest(value: safeValue, waiters: [continuation])
+                } else {
+                    pendingVolume?.value = safeValue
+                    pendingVolume?.waiters.append(continuation)
+                }
             }
-            guard !volumePumpRunning else { return }
-            volumePumpRunning = true
-            let request = takePendingVolume()
-            Task { await self.runVolumePump(startingWith: request) }
         }
+
+        volumePumpRunning = true
+        defer { startPendingVolumePumpIfNeeded() }
+        try await sendVolume(safeValue)
+        return safeValue
+    }
+
+    private func startPendingVolumePumpIfNeeded() {
+        guard pendingVolume != nil else {
+            volumePumpRunning = false
+            return
+        }
+        let request = takePendingVolume()
+        Task { await self.runVolumePump(startingWith: request) }
     }
 
     public func typeText(_ value: String) async throws {
