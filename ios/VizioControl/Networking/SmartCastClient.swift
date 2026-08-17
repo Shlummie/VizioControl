@@ -103,6 +103,7 @@ public actor SmartCastClient: SmartCastControlling {
         self.transport = transport
         self.token = token
         self.expectedSerial = expectedSerial
+        _ = singleKeyPayloads.count
     }
 
     public func setToken(_ token: String?) {
@@ -253,8 +254,9 @@ public actor SmartCastClient: SmartCastControlling {
     }
 
     public func pressKey(_ key: TVKey, count: Int = 1, timeout: Duration = .seconds(8)) async throws {
-        let keys = Array(repeating: key, count: min(10, max(1, count)))
+        let safeCount = min(10, max(1, count))
         if keyPumpRunning {
+            let keys = Array(repeating: key, count: safeCount)
             try await withCheckedThrowingContinuation { continuation in
                 pendingKeys.append(PendingKeyRequest(
                     keys: keys,
@@ -271,7 +273,7 @@ public actor SmartCastClient: SmartCastControlling {
         _ = try await perform(SCPLRequest(
             path: "/key_command/",
             method: .put,
-            body: keySequencePayload(keys),
+            body: keyPayload(key, count: safeCount),
             timeout: timeout
         ))
     }
@@ -509,8 +511,14 @@ public func keySequencePayload(_ keys: [TVKey]) -> JSONValue {
     ]
 }
 
+private let singleKeyPayloads = Dictionary(uniqueKeysWithValues:
+    smartCastKeyCodes.keys.map { ($0, keySequencePayload([$0])) }
+)
+
 public func keyPayload(_ key: TVKey, count: Int = 1) -> JSONValue {
-    keySequencePayload(Array(repeating: key, count: min(10, max(1, count))))
+    let safeCount = min(10, max(1, count))
+    if safeCount == 1 { return singleKeyPayloads[key]! }
+    return keySequencePayload(Array(repeating: key, count: safeCount))
 }
 
 public func flatVolumePayload(_ value: Int) -> JSONValue {
