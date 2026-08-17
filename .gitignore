@@ -16,3 +16,4 @@ coverage/
 xcuserdata/
 *.xcuserstate
 DerivedData/
+.build/

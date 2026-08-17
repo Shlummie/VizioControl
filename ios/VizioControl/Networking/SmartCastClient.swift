@@ -253,19 +253,36 @@ public actor SmartCastClient: SmartCastControlling {
     }
 
     public func pressKey(_ key: TVKey, count: Int = 1, timeout: Duration = .seconds(8)) async throws {
-        let safeCount = min(10, max(1, count))
-        try await withCheckedThrowingContinuation { continuation in
-            pendingKeys.append(PendingKeyRequest(
-                keys: Array(repeating: key, count: safeCount),
-                timeout: timeout,
-                batchable: !key.isPower,
-                continuation: continuation
-            ))
-            guard !keyPumpRunning else { return }
-            keyPumpRunning = true
-            let batch = takeKeyBatch()
-            Task { await self.runKeyPump(startingWith: batch) }
+        let keys = Array(repeating: key, count: min(10, max(1, count)))
+        if keyPumpRunning {
+            try await withCheckedThrowingContinuation { continuation in
+                pendingKeys.append(PendingKeyRequest(
+                    keys: keys,
+                    timeout: timeout,
+                    batchable: !key.isPower,
+                    continuation: continuation
+                ))
+            }
+            return
         }
+
+        keyPumpRunning = true
+        defer { startPendingKeyPumpIfNeeded() }
+        _ = try await perform(SCPLRequest(
+            path: "/key_command/",
+            method: .put,
+            body: keySequencePayload(keys),
+            timeout: timeout
+        ))
+    }
+
+    private func startPendingKeyPumpIfNeeded() {
+        guard !pendingKeys.isEmpty else {
+            keyPumpRunning = false
+            return
+        }
+        let batch = takeKeyBatch()
+        Task { await self.runKeyPump(startingWith: batch) }
     }
 
     public func setVolume(_ value: Double) async throws -> Int {
