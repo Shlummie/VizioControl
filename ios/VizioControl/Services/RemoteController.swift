@@ -654,7 +654,12 @@ public final class RemoteController {
         _ operation: @escaping @MainActor () async throws -> Value
     ) async throws -> Value {
         let id = UUID()
-        let task = Task { @MainActor in try await operation() }
+        let task: Task<Value, any Error>
+        if #available(iOS 26, macOS 26, *) {
+            task = Task.immediate { @MainActor in try await operation() }
+        } else {
+            task = Task { @MainActor in try await operation() }
+        }
         controlCancellations[id] = { task.cancel() }
         defer { controlCancellations[id] = nil }
         do {
