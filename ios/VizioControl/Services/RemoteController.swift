@@ -47,7 +47,8 @@ public final class RemoteController {
     @ObservationIgnored private var refreshContext: (id: UUID, task: Task<TVState, Never>)?
     @ObservationIgnored private var pollingTimer: DispatchSourceTimer?
     @ObservationIgnored private var postCommandRefreshWorkItem: DispatchWorkItem?
-    @ObservationIgnored private var controlCancellations: [UUID: () -> Void] = [:]
+    @ObservationIgnored private var nextControlID: UInt64 = 0
+    @ObservationIgnored private var controlCancellations: [UInt64: () -> Void] = [:]
     @ObservationIgnored private var sceneActivity: AppSceneActivity = .active
 
     public init(
@@ -653,7 +654,8 @@ public final class RemoteController {
     private func performUserOperation<Value: Sendable>(
         _ operation: @escaping @MainActor () async throws -> Value
     ) async throws -> Value {
-        let id = UUID()
+        let id = nextControlID
+        nextControlID &+= 1
         let task: Task<Value, any Error>
         if #available(iOS 26, macOS 26, *) {
             task = Task.immediate { @MainActor in try await operation() }
