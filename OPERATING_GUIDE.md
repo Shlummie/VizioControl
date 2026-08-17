@@ -9,14 +9,20 @@
 
 The obsolete Ollama/Qwen builds should not be installed. Current builds bundle Codex App Server `0.147.0` and do not use Ollama or an OpenAI API key.
 
+## Install the native iPhone client
+
+The iPhone app is a separate SwiftUI target and is installed directly from Xcode rather than from the Windows packages. Open `ios/VizioControl.xcodeproj`, choose the `VizioControl` scheme, select an approved paid Apple Developer Program team for `com.shlummie.viziocontrol`, connect and unlock the iPhone, select it as the destination, and press **Run**. Full broadcast Wake-on-LAN requires that the resulting provisioning profile contain Apple's approved `com.apple.developer.networking.multicast` entitlement.
+
+The native client runs on iOS 17 or later and talks directly to the TV on the private LAN. It has no desktop companion, TV viewport, ChatGPT sign-in, Luna controls, or cloud dependency.
+
 ## Pair a TV
 
-1. Put the PC and TV on the same home network. Turn on the TV or enable its quick-start mode.
-2. Open VizioControl and select **Scan**.
-3. Choose your TV. If discovery cannot find it after a DHCP change, enter its current private LAN address as the manual fallback and scan again.
+1. Put the Windows PC or iPhone and TV on the same private LAN. Turn on the TV or enable its quick-start mode.
+2. Open VizioControl. Select **Scan** on Windows or **Find TVs** on iPhone, and allow Local Network access when iOS asks.
+3. Choose the verified TV. If discovery cannot find it after a DHCP change, enter its current private LAN hostname/IP as the manual fallback and scan again.
 4. Enter the four-digit PIN displayed on the TV.
 
-The pairing token is encrypted with Windows credential protection. The app verifies the TV’s device identity before accepting its self-signed certificate; it does not disable TLS validation globally.
+The pairing token uses Windows credential protection in the desktop client and this iPhone's Keychain in the native client. Both clients pin the verified TV identity and self-signed certificate rather than disabling TLS validation globally.
 
 ## Manual control
 
