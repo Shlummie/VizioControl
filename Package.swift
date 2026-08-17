@@ -7,6 +7,7 @@ let package = Package(
     products: [
         .library(name: "VizioControl", targets: ["VizioControl"]),
         .executable(name: "ButtonPressLatencyBenchmark", targets: ["ButtonPressLatencyBenchmark"]),
+        .executable(name: "BurstButtonLatencyBenchmark", targets: ["BurstButtonLatencyBenchmark"]),
     ],
     targets: [
         .target(
@@ -23,7 +24,14 @@ let package = Package(
         .executableTarget(
             name: "ButtonPressLatencyBenchmark",
             dependencies: ["VizioControl"],
-            path: "benchmarks"
+            path: "benchmarks",
+            exclude: ["BurstButtonLatencyBenchmark"],
+            sources: ["ButtonPressLatencyBenchmark.swift"]
+        ),
+        .executableTarget(
+            name: "BurstButtonLatencyBenchmark",
+            dependencies: ["VizioControl"],
+            path: "benchmarks/BurstButtonLatencyBenchmark"
         ),
         .testTarget(
             name: "VizioControlTests",
