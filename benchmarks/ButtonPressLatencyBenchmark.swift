@@ -37,34 +37,58 @@ private final class DispatchLatencyProbe: @unchecked Sendable {
     }
 }
 
-private final class BenchmarkTransport: SmartCastTransport, @unchecked Sendable {
-    private let probe: DispatchLatencyProbe
+private final class BenchmarkProtocolState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var probe: DispatchLatencyProbe?
 
-    init(probe: DispatchLatencyProbe) {
+    func configure(probe: DispatchLatencyProbe) {
+        lock.lock()
         self.probe = probe
+        lock.unlock()
     }
 
-    func send(_ request: SCPLRequest, token: String?) async throws -> SCPLResponse {
-        if request.path == "/key_command/" {
-            probe.recordRequestStart()
-        }
+    func recordRequestStart() {
+        lock.lock()
+        let probe = probe
+        lock.unlock()
+        probe?.recordRequestStart()
+    }
+}
 
-        // Match the production transport's request-body serialization cost without
-        // touching the network. The response is fixed and immediately available.
-        if let body = request.body {
-            _ = try JSONEncoder().encode(body)
-        }
+private final class BenchmarkURLProtocol: URLProtocol, @unchecked Sendable {
+    private static let state = BenchmarkProtocolState()
+    private static let successData = Data(#"{"STATUS":{"RESULT":"SUCCESS"}}"#.utf8)
+    private static let powerData = Data(#"{"STATUS":{"RESULT":"SUCCESS"},"VALUE":1}"#.utf8)
 
-        let status: JSONValue = ["STATUS": ["RESULT": "SUCCESS"]]
-        if request.path == "/state/device/power_mode" {
-            return SCPLResponse(
+    static func configure(probe: DispatchLatencyProbe) {
+        state.configure(probe: probe)
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let path = request.url?.path ?? ""
+        if path.contains("key_command") {
+            Self.state.recordRequestStart()
+        }
+        guard let url = request.url,
+              let response = HTTPURLResponse(
+                url: url,
                 statusCode: 200,
-                body: ["STATUS": ["RESULT": "SUCCESS"], "VALUE": 1],
-                leafFingerprint: "AA"
-            )
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "application/json"]
+              ) else {
+            client?.urlProtocol(self, didFailWithError: BenchmarkFailure("Invalid benchmark request URL."))
+            return
         }
-        return SCPLResponse(statusCode: 200, body: status, leafFingerprint: "AA")
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: path.contains("power_mode") ? Self.powerData : Self.successData)
+        client?.urlProtocolDidFinishLoading(self)
     }
+
+    override func stopLoading() {}
 }
 
 private actor BenchmarkStore: AppStoring {
@@ -149,13 +173,22 @@ private struct ButtonPressLatencyBenchmark {
             pairedAt: Date(timeIntervalSince1970: 0)
         )
         let probe = DispatchLatencyProbe()
-        let transport = BenchmarkTransport(probe: probe)
+        BenchmarkURLProtocol.configure(probe: probe)
         let store = BenchmarkStore(device: device)
         let controller = RemoteController(
             store: store,
             keychain: BenchmarkTokenStore(),
-            clientFactory: { endpoint, _, token, serial in
-                SmartCastClient(
+            clientFactory: { endpoint, trustMode, token, serial in
+                let transport = URLSessionSmartCastTransport(
+                    endpoint: endpoint,
+                    trustMode: trustMode,
+                    configurationFactory: {
+                        let configuration = URLSessionConfiguration.ephemeral
+                        configuration.protocolClasses = [BenchmarkURLProtocol.self]
+                        return configuration
+                    }
+                )
+                return SmartCastClient(
                     endpoint: endpoint,
                     transport: transport,
                     token: token,
