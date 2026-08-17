@@ -14,6 +14,7 @@ public struct SCPLRequest: Sendable {
     public let authenticated: Bool
     public let timeout: Duration
     let preencodedBody: Data?
+    let statusOnlyResponse: Bool
 
     public init(
         path: String,
@@ -26,6 +27,7 @@ public struct SCPLRequest: Sendable {
         self.method = method
         self.body = body
         self.preencodedBody = nil
+        self.statusOnlyResponse = false
         self.authenticated = authenticated
         self.timeout = timeout
     }
@@ -35,6 +37,7 @@ public struct SCPLRequest: Sendable {
         method: SCPLMethod,
         body: JSONValue,
         preencodedBody: Data,
+        statusOnlyResponse: Bool = false,
         authenticated: Bool = true,
         timeout: Duration = .seconds(8)
     ) {
@@ -44,6 +47,7 @@ public struct SCPLRequest: Sendable {
         self.authenticated = authenticated
         self.timeout = timeout
         self.preencodedBody = preencodedBody
+        self.statusOnlyResponse = statusOnlyResponse
     }
 }
 
@@ -198,6 +202,12 @@ public final class URLSessionSmartCastTransport: SmartCastTransport, @unchecked 
         let body: JSONValue
         if result.data.isEmpty {
             body = .object([:])
+        } else if request.statusOnlyResponse {
+            do {
+                body = try keyCommandStatusBody(from: result.data)
+            } catch {
+                throw VizioControlError.message("TV returned an unreadable response.")
+            }
         } else {
             do {
                 body = try JSONDecoder().decode(JSONValue.self, from: result.data)
@@ -216,6 +226,34 @@ public final class URLSessionSmartCastTransport: SmartCastTransport, @unchecked 
 private struct HTTPResult: Sendable {
     let statusCode: Int
     let data: Data
+}
+
+private struct KeyCommandStatusEnvelope: Decodable {
+    struct Status: Decodable {
+        let result: String?
+        let detail: String?
+
+        enum CodingKeys: String, CodingKey {
+            case result = "RESULT"
+            case detail = "DETAIL"
+        }
+    }
+
+    let status: Status?
+
+    enum CodingKeys: String, CodingKey {
+        case status = "STATUS"
+    }
+}
+
+private func keyCommandStatusBody(from data: Data) throws -> JSONValue {
+    guard let status = try JSONDecoder().decode(KeyCommandStatusEnvelope.self, from: data).status else {
+        return .object([:])
+    }
+    var value: [String: JSONValue] = [:]
+    if let result = status.result { value["RESULT"] = .string(result) }
+    if let detail = status.detail { value["DETAIL"] = .string(detail) }
+    return ["STATUS": .object(value)]
 }
 
 private final class URLSessionDeadlineOperation: @unchecked Sendable {

@@ -279,6 +279,7 @@ public actor SmartCastClient: SmartCastControlling {
                 method: .put,
                 body: prepared.body,
                 preencodedBody: preencodedBody,
+                statusOnlyResponse: true,
                 timeout: timeout
             )
         } else {
@@ -288,6 +289,7 @@ public actor SmartCastClient: SmartCastControlling {
                 method: .put,
                 body: keySequencePayload(keys),
                 preencodedBody: preencodedKeySequencePayload(keys),
+                statusOnlyResponse: true,
                 timeout: timeout
             )
         }
@@ -425,6 +427,7 @@ public actor SmartCastClient: SmartCastControlling {
                     method: .put,
                     body: keySequencePayload(keys),
                     preencodedBody: preencodedKeySequencePayload(keys),
+                    statusOnlyResponse: true,
                     timeout: timeout
                 ))
                 batch.forEach { $0.continuation.resume() }
