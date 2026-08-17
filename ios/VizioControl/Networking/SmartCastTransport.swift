@@ -254,7 +254,13 @@ private struct KeyCommandStatusEnvelope: Decodable {
     }
 }
 
+private let exactSuccessStatusData = Data(#"{"STATUS":{"RESULT":"SUCCESS"}}"#.utf8)
+private let exactSuccessStatusBody: JSONValue = ["STATUS": ["RESULT": "SUCCESS"]]
+
 private func keyCommandStatusBody(from data: Data) throws -> JSONValue {
+    if data == exactSuccessStatusData {
+        return exactSuccessStatusBody
+    }
     guard let status = try JSONDecoder().decode(KeyCommandStatusEnvelope.self, from: data).status else {
         return .object([:])
     }
