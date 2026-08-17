@@ -479,14 +479,7 @@ public actor SmartCastClient: SmartCastControlling {
 
     private func sendVolume(_ value: Int) async throws {
         do {
-            let prepared = preparedFlatVolumePayloads[value]
-            _ = try await perform(SCPLRequest(
-                path: "/audio/volume/level",
-                method: .put,
-                body: prepared.body,
-                preencodedBody: prepared.encoded,
-                statusOnlyResponse: true
-            ))
+            _ = try await perform(preparedFlatVolumeRequests[value])
             return
         } catch let error as SmartCastRequestError
             where error.statusCode == 404 || error.result == "URI_NOT_FOUND" {
@@ -581,15 +574,14 @@ private struct PreparedKeyPayload: Sendable {
     let preencodedBody: Data?
 }
 
-private struct PreparedVolumePayload: Sendable {
-    let body: JSONValue
-    let encoded: Data
-}
-
-private let preparedFlatVolumePayloads: [PreparedVolumePayload] = (0...100).map { value in
-    PreparedVolumePayload(
-        body: ["LEVEL": .number(Double(value))],
-        encoded: Data("{\"LEVEL\":\(value)}".utf8)
+private let preparedFlatVolumeRequests: [SCPLRequest] = (0...100).map { value in
+    let body: JSONValue = ["LEVEL": .number(Double(value))]
+    return SCPLRequest(
+        path: "/audio/volume/level",
+        method: .put,
+        body: body,
+        preencodedBody: Data("{\"LEVEL\":\(value)}".utf8),
+        statusOnlyResponse: true
     )
 }
 private let singleKeyPayloads: [TVKey: PreparedKeyPayload] = {
