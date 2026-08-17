@@ -479,10 +479,12 @@ public actor SmartCastClient: SmartCastControlling {
 
     private func sendVolume(_ value: Int) async throws {
         do {
+            let prepared = preparedFlatVolumePayloads[value]
             _ = try await perform(SCPLRequest(
                 path: "/audio/volume/level",
                 method: .put,
-                body: flatVolumePayload(value)
+                body: prepared.body,
+                preencodedBody: prepared.encoded
             ))
             return
         } catch let error as SmartCastRequestError
@@ -578,8 +580,20 @@ private struct PreparedKeyPayload: Sendable {
     let preencodedBody: Data?
 }
 
+private struct PreparedVolumePayload: Sendable {
+    let body: JSONValue
+    let encoded: Data
+}
+
+private let preparedFlatVolumePayloads: [PreparedVolumePayload] = (0...100).map { value in
+    PreparedVolumePayload(
+        body: ["LEVEL": .number(Double(value))],
+        encoded: Data("{\"LEVEL\":\(value)}".utf8)
+    )
+}
 private let singleKeyPayloads: [TVKey: PreparedKeyPayload] = {
     let encoder = JSONEncoder()
+
     return Dictionary(uniqueKeysWithValues: smartCastKeyCodes.keys.map { key in
         let body = keySequencePayload([key])
         return (key, PreparedKeyPayload(body: body, preencodedBody: try? encoder.encode(body)))
