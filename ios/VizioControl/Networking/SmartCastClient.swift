@@ -474,7 +474,7 @@ public actor SmartCastClient: SmartCastControlling {
     }
 }
 
-public let smartCastKeyCodes: [TVKey: (codeset: Int, code: Int)] = [
+let smartCastKeyCodes: [TVKey: (codeset: Int, code: Int)] = [
     .powerOff: (11, 0),
     .powerOn: (11, 1),
     .powerToggle: (11, 2),
@@ -497,7 +497,7 @@ public let smartCastKeyCodes: [TVKey: (codeset: Int, code: Int)] = [
     .play: (2, 3)
 ]
 
-public func keySequencePayload(_ keys: [TVKey]) -> JSONValue {
+func keySequencePayload(_ keys: [TVKey]) -> JSONValue {
     precondition((1...10).contains(keys.count), "SmartCast key sequences accept 1–10 commands.")
     return [
         "KEYLIST": .array(keys.map { key in
@@ -515,7 +515,7 @@ private let singleKeyPayloads = Dictionary(uniqueKeysWithValues:
     smartCastKeyCodes.keys.map { ($0, keySequencePayload([$0])) }
 )
 
-public func keyPayload(_ key: TVKey, count: Int = 1) -> JSONValue {
+func keyPayload(_ key: TVKey, count: Int = 1) -> JSONValue {
     let safeCount = min(10, max(1, count))
     if safeCount == 1 { return singleKeyPayloads[key]! }
     return keySequencePayload(Array(repeating: key, count: safeCount))
