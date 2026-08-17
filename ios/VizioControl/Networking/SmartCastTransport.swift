@@ -120,6 +120,7 @@ public final class URLSessionSmartCastTransport: SmartCastTransport, @unchecked 
 
     private let endpoint: DeviceEndpoint
     private let keyCommandURL: URL?
+    private let volumeLevelURL: URL?
     private let delegate: SmartCastTrustDelegate
     private let session: URLSession
     private let deadlineSleep: DeadlineSleep?
@@ -133,6 +134,7 @@ public final class URLSessionSmartCastTransport: SmartCastTransport, @unchecked 
         self.endpoint = endpoint
         self.deadlineSleep = deadlineSleep
         keyCommandURL = smartCastURL(endpoint: endpoint, path: "/key_command/")
+        volumeLevelURL = smartCastURL(endpoint: endpoint, path: "/audio/volume/level")
         let connectionHost = smartCastConnectionHost(endpoint)
         delegate = SmartCastTrustDelegate(policy: SmartCastTrustPolicy(endpointHost: connectionHost, mode: trustMode))
 
@@ -148,9 +150,15 @@ public final class URLSessionSmartCastTransport: SmartCastTransport, @unchecked 
 
 
     public func send(_ request: SCPLRequest, token: String?) async throws -> SCPLResponse {
-        let url = request.path == "/key_command/"
-            ? keyCommandURL
-            : smartCastURL(endpoint: endpoint, path: request.path)
+        let url: URL?
+        switch request.path {
+        case "/key_command/":
+            url = keyCommandURL
+        case "/audio/volume/level":
+            url = volumeLevelURL
+        default:
+            url = smartCastURL(endpoint: endpoint, path: request.path)
+        }
         guard let url else {
             throw VizioControlError.message("TV address is invalid.")
         }
