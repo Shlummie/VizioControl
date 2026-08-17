@@ -240,6 +240,7 @@ private final class URLSessionDeadlineOperation: @unchecked Sendable {
                     let task = session.dataTask(with: request) { data, response, error in
                         reference.value.networkCompleted(data: data, response: response, error: error)
                     }
+                    task.priority = URLSessionTask.highPriority
 
                     let cancelledBeforeStart = lock.withLock {
                         self.continuation = continuation
