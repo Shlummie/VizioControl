@@ -516,27 +516,35 @@ let smartCastKeyCodes: [TVKey: (codeset: Int, code: Int)] = [
 private let keyListPrefix = Data("{\"KEYLIST\":[".utf8)
 private let keyListSuffix = Data("]}".utf8)
 private let keyListSeparator = Data(",".utf8)
-private let preencodedKeyFragments: [TVKey: Data] = Dictionary(
+private struct PreparedKeyCommand: Sendable {
+    let body: JSONValue
+    let encoded: Data
+}
+
+private let preparedKeyCommands: [TVKey: PreparedKeyCommand] = Dictionary(
     uniqueKeysWithValues: smartCastKeyCodes.map { key, command in
-        (
-            key,
-            Data(
-                "{\"ACTION\":\"KEYPRESS\",\"CODE\":\(command.code),\"CODESET\":\(command.codeset)}".utf8
-            )
+        let body: JSONValue = [
+            "CODESET": .number(Double(command.codeset)),
+            "CODE": .number(Double(command.code)),
+            "ACTION": "KEYPRESS"
+        ]
+        let encoded = Data(
+            "{\"ACTION\":\"KEYPRESS\",\"CODE\":\(command.code),\"CODESET\":\(command.codeset)}".utf8
         )
+        return (key, PreparedKeyCommand(body: body, encoded: encoded))
     }
 )
 
 private func preencodedKeySequencePayload(_ keys: [TVKey]) -> Data {
     precondition((1...10).contains(keys.count), "SmartCast key sequences accept 1–10 commands.")
     var capacity = keyListPrefix.count + keyListSuffix.count + max(0, keys.count - 1)
-    for key in keys { capacity += preencodedKeyFragments[key]!.count }
+    for key in keys { capacity += preparedKeyCommands[key]!.encoded.count }
     var data = Data()
     data.reserveCapacity(capacity)
     data.append(keyListPrefix)
     for (index, key) in keys.enumerated() {
         if index > 0 { data.append(keyListSeparator) }
-        data.append(preencodedKeyFragments[key]!)
+        data.append(preparedKeyCommands[key]!.encoded)
     }
     data.append(keyListSuffix)
     return data
@@ -546,14 +554,7 @@ private func preencodedKeySequencePayload(_ keys: [TVKey]) -> Data {
 func keySequencePayload(_ keys: [TVKey]) -> JSONValue {
     precondition((1...10).contains(keys.count), "SmartCast key sequences accept 1–10 commands.")
     return [
-        "KEYLIST": .array(keys.map { key in
-            let command = smartCastKeyCodes[key]!
-            return [
-                "CODESET": .number(Double(command.codeset)),
-                "CODE": .number(Double(command.code)),
-                "ACTION": "KEYPRESS"
-            ]
-        })
+        "KEYLIST": .array(keys.map { preparedKeyCommands[$0]!.body })
     ]
 }
 
