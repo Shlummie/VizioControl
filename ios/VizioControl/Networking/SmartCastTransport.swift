@@ -8,11 +8,12 @@ public enum SCPLMethod: String, Sendable {
 }
 
 public struct SCPLRequest: Sendable {
-    public var path: String
-    public var method: SCPLMethod
-    public var body: JSONValue?
-    public var authenticated: Bool
-    public var timeout: Duration
+    public let path: String
+    public let method: SCPLMethod
+    public let body: JSONValue?
+    public let authenticated: Bool
+    public let timeout: Duration
+    let preencodedBody: Data?
 
     public init(
         path: String,
@@ -24,8 +25,25 @@ public struct SCPLRequest: Sendable {
         self.path = path
         self.method = method
         self.body = body
+        self.preencodedBody = nil
         self.authenticated = authenticated
         self.timeout = timeout
+    }
+
+    init(
+        path: String,
+        method: SCPLMethod,
+        body: JSONValue,
+        preencodedBody: Data,
+        authenticated: Bool = true,
+        timeout: Duration = .seconds(8)
+    ) {
+        self.path = path
+        self.method = method
+        self.body = body
+        self.authenticated = authenticated
+        self.timeout = timeout
+        self.preencodedBody = preencodedBody
     }
 }
 
@@ -132,11 +150,18 @@ public final class URLSessionSmartCastTransport: SmartCastTransport, @unchecked 
         urlRequest.httpMethod = request.method.rawValue
         urlRequest.setValue("application/json", forHTTPHeaderField: "Accept")
         urlRequest.cachePolicy = .reloadIgnoringLocalCacheData
-        if let body = request.body {
-            let data = try JSONEncoder().encode(body)
-            urlRequest.httpBody = data
+        let bodyData: Data?
+        if let preencodedBody = request.preencodedBody {
+            bodyData = preencodedBody
+        } else if let body = request.body {
+            bodyData = try JSONEncoder().encode(body)
+        } else {
+            bodyData = nil
+        }
+        if let bodyData {
+            urlRequest.httpBody = bodyData
             urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            urlRequest.setValue(String(data.count), forHTTPHeaderField: "Content-Length")
+            urlRequest.setValue(String(bodyData.count), forHTTPHeaderField: "Content-Length")
         }
         if request.authenticated, let token {
             urlRequest.setValue(token, forHTTPHeaderField: "AUTH")

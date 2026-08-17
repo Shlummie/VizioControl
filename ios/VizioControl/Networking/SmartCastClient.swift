@@ -270,12 +270,26 @@ public actor SmartCastClient: SmartCastControlling {
 
         keyPumpRunning = true
         defer { startPendingKeyPumpIfNeeded() }
-        _ = try await perform(SCPLRequest(
-            path: "/key_command/",
-            method: .put,
-            body: keyPayload(key, count: safeCount),
-            timeout: timeout
-        ))
+        let request: SCPLRequest
+        if safeCount == 1,
+           let prepared = singleKeyPayloads[key],
+           let preencodedBody = prepared.preencodedBody {
+            request = SCPLRequest(
+                path: "/key_command/",
+                method: .put,
+                body: prepared.body,
+                preencodedBody: preencodedBody,
+                timeout: timeout
+            )
+        } else {
+            request = SCPLRequest(
+                path: "/key_command/",
+                method: .put,
+                body: keySequencePayload(Array(repeating: key, count: safeCount)),
+                timeout: timeout
+            )
+        }
+        _ = try await perform(request)
     }
 
     private func startPendingKeyPumpIfNeeded() {
@@ -511,13 +525,22 @@ func keySequencePayload(_ keys: [TVKey]) -> JSONValue {
     ]
 }
 
-private let singleKeyPayloads = Dictionary(uniqueKeysWithValues:
-    smartCastKeyCodes.keys.map { ($0, keySequencePayload([$0])) }
-)
+private struct PreparedKeyPayload: Sendable {
+    let body: JSONValue
+    let preencodedBody: Data?
+}
+
+private let singleKeyPayloads: [TVKey: PreparedKeyPayload] = {
+    let encoder = JSONEncoder()
+    return Dictionary(uniqueKeysWithValues: smartCastKeyCodes.keys.map { key in
+        let body = keySequencePayload([key])
+        return (key, PreparedKeyPayload(body: body, preencodedBody: try? encoder.encode(body)))
+    })
+}()
 
 func keyPayload(_ key: TVKey, count: Int = 1) -> JSONValue {
     let safeCount = min(10, max(1, count))
-    if safeCount == 1 { return singleKeyPayloads[key]! }
+    if safeCount == 1 { return singleKeyPayloads[key]!.body }
     return keySequencePayload(Array(repeating: key, count: safeCount))
 }
 
