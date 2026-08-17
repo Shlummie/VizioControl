@@ -282,10 +282,12 @@ public actor SmartCastClient: SmartCastControlling {
                 timeout: timeout
             )
         } else {
+            let keys = Array(repeating: key, count: safeCount)
             request = SCPLRequest(
                 path: "/key_command/",
                 method: .put,
-                body: keySequencePayload(Array(repeating: key, count: safeCount)),
+                body: keySequencePayload(keys),
+                preencodedBody: preencodedKeySequencePayload(keys),
                 timeout: timeout
             )
         }
@@ -422,6 +424,7 @@ public actor SmartCastClient: SmartCastControlling {
                     path: "/key_command/",
                     method: .put,
                     body: keySequencePayload(keys),
+                    preencodedBody: preencodedKeySequencePayload(keys),
                     timeout: timeout
                 ))
                 batch.forEach { $0.continuation.resume() }
@@ -510,6 +513,35 @@ let smartCastKeyCodes: [TVKey: (codeset: Int, code: Int)] = [
     .pause: (2, 2),
     .play: (2, 3)
 ]
+private let keyListPrefix = Data("{\"KEYLIST\":[".utf8)
+private let keyListSuffix = Data("]}".utf8)
+private let keyListSeparator = Data(",".utf8)
+private let preencodedKeyFragments: [TVKey: Data] = Dictionary(
+    uniqueKeysWithValues: smartCastKeyCodes.map { key, command in
+        (
+            key,
+            Data(
+                "{\"ACTION\":\"KEYPRESS\",\"CODE\":\(command.code),\"CODESET\":\(command.codeset)}".utf8
+            )
+        )
+    }
+)
+
+private func preencodedKeySequencePayload(_ keys: [TVKey]) -> Data {
+    precondition((1...10).contains(keys.count), "SmartCast key sequences accept 1–10 commands.")
+    var capacity = keyListPrefix.count + keyListSuffix.count + max(0, keys.count - 1)
+    for key in keys { capacity += preencodedKeyFragments[key]!.count }
+    var data = Data()
+    data.reserveCapacity(capacity)
+    data.append(keyListPrefix)
+    for (index, key) in keys.enumerated() {
+        if index > 0 { data.append(keyListSeparator) }
+        data.append(preencodedKeyFragments[key]!)
+    }
+    data.append(keyListSuffix)
+    return data
+}
+
 
 func keySequencePayload(_ keys: [TVKey]) -> JSONValue {
     precondition((1...10).contains(keys.count), "SmartCast key sequences accept 1–10 commands.")
