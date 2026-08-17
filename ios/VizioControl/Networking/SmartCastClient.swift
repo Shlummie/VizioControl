@@ -484,7 +484,8 @@ public actor SmartCastClient: SmartCastControlling {
                 path: "/audio/volume/level",
                 method: .put,
                 body: prepared.body,
-                preencodedBody: prepared.encoded
+                preencodedBody: prepared.encoded,
+                statusOnlyResponse: true
             ))
             return
         } catch let error as SmartCastRequestError
