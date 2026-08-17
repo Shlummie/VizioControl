@@ -212,7 +212,7 @@ public final class URLSessionSmartCastTransport: SmartCastTransport, @unchecked 
             body = .object([:])
         } else if request.statusOnlyResponse {
             do {
-                body = try keyCommandStatusBody(from: result.data)
+                body = try statusOnlyResponseBody(from: result.data)
             } catch {
                 throw VizioControlError.message("TV returned an unreadable response.")
             }
@@ -257,7 +257,7 @@ private struct KeyCommandStatusEnvelope: Decodable {
 private let exactSuccessStatusData = Data(#"{"STATUS":{"RESULT":"SUCCESS"}}"#.utf8)
 private let exactSuccessStatusBody: JSONValue = ["STATUS": ["RESULT": "SUCCESS"]]
 
-private func keyCommandStatusBody(from data: Data) throws -> JSONValue {
+private func statusOnlyResponseBody(from data: Data) throws -> JSONValue {
     if data == exactSuccessStatusData {
         return exactSuccessStatusBody
     }

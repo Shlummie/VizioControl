@@ -176,6 +176,11 @@ final class SmartCastClientTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(transmitted, [20, 48, 48])
         let records = await transport.recorded()
         XCTAssertEqual(records.map(\.request.body), [["LEVEL": 20], ["LEVEL": 48]])
+        XCTAssertEqual(
+            records.map(\.request.preencodedBody),
+            [Data(#"{"LEVEL":20}"#.utf8), Data(#"{"LEVEL":48}"#.utf8)]
+        )
+        XCTAssertTrue(records.allSatisfy(\.request.statusOnlyResponse))
     }
 
     func testVolumeFallbackOnlyForUnsupportedEndpoint() async throws {

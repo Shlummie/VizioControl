@@ -69,6 +69,34 @@ final class SmartCastTransportTests: XCTestCase, @unchecked Sendable {
         XCTAssertNotNil(request.httpBody ?? request.httpBodyStream.map { _ in Data() })
     }
 
+    func testOptimizedStatusRequestPreservesWireAndResponseContracts() async throws {
+        await captureProtocolProbe.reset()
+        let transport = URLSessionSmartCastTransport(
+            endpoint: DeviceEndpoint(host: "192.168.50.42"),
+            trustMode: .firstContact,
+            configurationFactory: {
+                let configuration = URLSessionConfiguration.ephemeral
+                configuration.protocolClasses = [CapturingURLProtocol.self]
+                return configuration
+            }
+        )
+        let encodedBody = Data(#"{"LEVEL":20}"#.utf8)
+
+        let response = try await transport.send(SCPLRequest(
+            path: "/audio/volume/level",
+            method: .put,
+            body: ["LEVEL": 20],
+            preencodedBody: encodedBody,
+            statusOnlyResponse: true
+        ), token: "secret")
+
+        XCTAssertEqual(response.body["STATUS"]?["RESULT"]?.stringValue, "SUCCESS")
+        let request = await captureProtocolProbe.waitForRequest()
+        XCTAssertEqual(request.url?.absoluteString, "https://192.168.50.42:7345/audio/volume/level")
+        XCTAssertNotNil(request.httpBody ?? request.httpBodyStream.map { _ in Data() })
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Length"), String(encodedBody.count))
+    }
+
     func testHostnameEndpointUsesResolvedPrivateIPv4ForTVRequests() {
         let endpoint = DeviceEndpoint(
             host: "living-room.local",
