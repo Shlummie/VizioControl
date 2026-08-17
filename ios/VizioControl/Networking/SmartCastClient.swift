@@ -114,7 +114,7 @@ public actor SmartCastClient: SmartCastControlling {
         expectedSerial = serial
     }
 
-    public func perform(_ request: SCPLRequest) async throws -> SCPLResponse {
+    private func perform(_ request: SCPLRequest) async throws -> SCPLResponse {
         if request.authenticated, token == nil {
             throw VizioControlError.missingPairingToken
         }
