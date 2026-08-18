@@ -7,13 +7,13 @@ final class RemoteControllerTests: XCTestCase, @unchecked Sendable {
     private let endpoint = DeviceEndpoint(host: "192.168.50.42", resolvedAddresses: ["192.168.50.42"], interfaceIndex: 4)
     private let fingerprint = String(repeating: "AB", count: 32)
 
-    func testInitializeClearsOrphanedMetadataButKeepsSettingsAndCommands() async throws {
-        let command = savedCommand()
+    func testInitializeClearsOrphanedMetadataButKeepsSettingsAndMacros() async throws {
+        let macro = savedMacro()
         let device = pairedDevice()
         let store = MemoryAppStore(StoreFile(
             settings: AppSettings(manualAddress: "tv.local", manualMACAddress: "A8:C9:6B:12:34:56"),
             device: device,
-            commands: [command]
+            macros: [macro]
         ))
         let controller = RemoteController(
             store: store,
@@ -28,7 +28,7 @@ final class RemoteControllerTests: XCTestCase, @unchecked Sendable {
 
         XCTAssertNil(controller.pairedDevice)
         XCTAssertEqual(controller.settings.manualAddress, "tv.local")
-        XCTAssertEqual(controller.commands.map(\.id), [command.id])
+        XCTAssertEqual(controller.macros.map(\.id), [macro.id])
         XCTAssertNil(storedAfterInitialization.device)
         XCTAssertEqual(controller.errorBanner, VizioControlError.pairingCredentialsUnavailable.localizedDescription)
     }
@@ -270,20 +270,244 @@ final class RemoteControllerTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(setup.controller.errorBanner, RemoteController.wakeTimeoutMessage)
     }
 
-    func testFailedCommandIsNotSavedAndSuccessfulReplayUpdatesUsage() async throws {
-        let setup = await pairedController(state: TVState(connected: true, power: true, muted: false, endpoint: endpoint))
-        await setup.client.setPressError(.message("packet failed"))
+    func testCreateAndUpdateMacroValidateWithoutControllingTV() async throws {
+        let setup = await pairedController(
+            state: TVState(connected: true, power: true, muted: false, endpoint: endpoint)
+        )
 
-        await XCTAssertThrowsRemoteError(try await setup.controller.runLocalRequest("mute"))
-        XCTAssertEqual(setup.controller.commands, [])
+        let saved = try await setup.controller.createMacro(
+            name: "  Movie night  ",
+            actions: [.key(.up, count: 1), .launchApp("youtube")]
+        )
+        let eventsAfterCreate = await setup.client.events()
 
-        await setup.client.setPressError(nil)
-        let saved = try await setup.controller.runLocalRequest("mute")
-        _ = try await setup.controller.runSavedCommand(id: saved.id)
+        XCTAssertEqual(saved.name, "Movie night")
+        XCTAssertEqual(saved.actions, [.key(.up, count: 1), .launchApp("YouTube")])
+        XCTAssertEqual(saved.usageCount, 0)
+        XCTAssertTrue(eventsAfterCreate.isEmpty)
+
+        let updated = try await setup.controller.updateMacro(
+            id: saved.id,
+            name: "Intermission",
+            actions: [.wait(milliseconds: 500), .setVolume(20)]
+        )
+        let eventsAfterUpdate = await setup.client.events()
+
+        XCTAssertEqual(updated.id, saved.id)
+        XCTAssertEqual(updated.name, "Intermission")
+        XCTAssertEqual(updated.actions, [.wait(milliseconds: 500), .setVolume(20)])
+        XCTAssertEqual(updated.order, saved.order)
+        XCTAssertEqual(updated.createdAt, saved.createdAt)
+        XCTAssertEqual(updated.usageCount, 0)
+        XCTAssertTrue(eventsAfterUpdate.isEmpty)
+
+        await XCTAssertThrowsRemoteError(
+            try await setup.controller.updateMacro(id: saved.id, name: " ", actions: updated.actions)
+        ) { error in
+            XCTAssertEqual(error.localizedDescription, "Macro name cannot be empty.")
+        }
+        XCTAssertEqual(setup.controller.macros, [updated])
+    }
+
+    func testDraftTestControlsTVWithoutSavingOrIncrementingUsage() async throws {
+        let waitGate = ContinuationGate()
+        let setup = await pairedController(
+            state: TVState(connected: true, power: true, muted: false, endpoint: endpoint),
+            sleep: { _ in await waitGate.enterAndWait() }
+        )
+        let saved = try await setup.controller.createMacro(
+            name: "Saved",
+            actions: [.key(.left, count: 1)]
+        )
+
+        let draftTest = Task { @MainActor in
+            try await setup.controller.testMacro(
+                name: "  Draft  ",
+                actions: [
+                    .key(.ok, count: 1),
+                    .wait(milliseconds: 500),
+                    .launchApp("netflix"),
+                ]
+            )
+        }
+        await waitGate.waitUntilEntered()
+        XCTAssertEqual(
+            setup.controller.macroRunProgress,
+            MacroRunProgress(
+                macroID: nil,
+                name: "Draft",
+                currentStep: 2,
+                totalSteps: 3,
+                action: .wait(milliseconds: 500)
+            )
+        )
+        await waitGate.release()
+        try await draftTest.value
         await setup.controller.handleScenePhase(.background)
+        let events = await setup.client.events()
 
-        XCTAssertEqual(setup.controller.commands.count, 1)
-        XCTAssertEqual(setup.controller.commands[0].usageCount, 2)
+        XCTAssertEqual(events, ["key:ok:1", "app:Netflix"])
+        XCTAssertEqual(setup.controller.macros, [saved])
+        XCTAssertEqual(setup.controller.macros[0].usageCount, 0)
+        XCTAssertEqual(setup.controller.successStatus, "Draft test completed.")
+        XCTAssertNil(setup.controller.macroRunProgress)
+    }
+
+    func testMacroReplayWaitsInOrderRejectsInterleavingAndCountsCompletedRun() async throws {
+        let waitGate = ContinuationGate()
+        let setup = await pairedController(
+            state: TVState(connected: true, power: true, endpoint: endpoint),
+            sleep: { _ in await waitGate.enterAndWait() }
+        )
+        let saved = try await setup.controller.createMacro(
+            name: "Ordered",
+            actions: [
+                .key(.up, count: 1),
+                .wait(milliseconds: 500),
+                .launchApp("Netflix"),
+            ]
+        )
+
+        let replay = Task { @MainActor in
+            try await setup.controller.runMacro(id: saved.id)
+        }
+        await waitGate.waitUntilEntered()
+        let eventsBeforeWaitRelease = await setup.client.events()
+
+        XCTAssertEqual(eventsBeforeWaitRelease, ["key:up:1"])
+        XCTAssertTrue(setup.controller.isRunningMacro)
+        XCTAssertEqual(
+            setup.controller.macroRunProgress,
+            MacroRunProgress(
+                macroID: saved.id,
+                name: "Ordered",
+                currentStep: 2,
+                totalSteps: 3,
+                action: .wait(milliseconds: 500)
+            )
+        )
+        await XCTAssertThrowsRemoteError(try await setup.controller.press(.left)) { error in
+            XCTAssertEqual(error.localizedDescription, "Wait for the running macro to finish.")
+        }
+        await XCTAssertThrowsRemoteError(try await setup.controller.runMacro(id: saved.id)) { error in
+            XCTAssertEqual(error.localizedDescription, "Another macro is already running.")
+        }
+
+        await waitGate.release()
+        let completed = try await replay.value
+        await setup.controller.handleScenePhase(.background)
+        let completedEvents = await setup.client.events()
+
+        XCTAssertEqual(completedEvents, ["key:up:1", "app:Netflix"])
+        XCTAssertEqual(completed.usageCount, 1)
+        XCTAssertEqual(setup.controller.macros[0].usageCount, 1)
+        XCTAssertFalse(setup.controller.isRunningMacro)
+        XCTAssertNil(setup.controller.macroRunProgress)
+    }
+
+    func testFailedMacroReplayStopsAtFirstErrorWithoutIncrementingUsage() async throws {
+        let setup = await pairedController(
+            state: TVState(connected: true, power: true, volume: 10, endpoint: endpoint)
+        )
+        let saved = try await setup.controller.createMacro(
+            name: "Failure",
+            actions: [.key(.up, count: 1), .key(.right, count: 1), .key(.left, count: 1)]
+        )
+        await setup.client.setPressError(.message("packet failed"), for: .right)
+
+        await XCTAssertThrowsRemoteError(try await setup.controller.runMacro(id: saved.id)) { error in
+            XCTAssertEqual(error.localizedDescription, "packet failed")
+        }
+        await setup.controller.handleScenePhase(.background)
+        let events = await setup.client.events()
+
+        XCTAssertEqual(events, ["key:up:1", "key:right:1"])
+        XCTAssertEqual(setup.controller.macros[0].usageCount, 0)
+        XCTAssertFalse(setup.controller.isRunningMacro)
+        XCTAssertNil(setup.controller.macroRunProgress)
+    }
+
+    func testBackgroundCancellationStopsRemainingMacroStepsAndUsageAccounting() async throws {
+        let waitGate = ContinuationGate()
+        let setup = await pairedController(
+            state: TVState(connected: true, power: true, endpoint: endpoint),
+            sleep: { _ in await waitGate.enterAndWait() }
+        )
+        let saved = try await setup.controller.createMacro(
+            name: "Cancelled",
+            actions: [
+                .key(.up, count: 1),
+                .wait(milliseconds: 500),
+                .key(.right, count: 1),
+            ]
+        )
+        let replay = Task { @MainActor in
+            try await setup.controller.runMacro(id: saved.id)
+        }
+        await waitGate.waitUntilEntered()
+        XCTAssertEqual(setup.controller.macroRunProgress?.currentStep, 2)
+
+        await setup.controller.handleScenePhase(.background)
+        await waitGate.release()
+        do {
+            _ = try await replay.value
+            XCTFail("Expected cancellation")
+        } catch is CancellationError {
+        } catch {
+            XCTFail("Expected CancellationError, got \(error)")
+        }
+        let events = await setup.client.events()
+
+        XCTAssertEqual(events, ["key:up:1"])
+        XCTAssertEqual(setup.controller.macros[0].usageCount, 0)
+        XCTAssertFalse(setup.controller.isRunningMacro)
+        XCTAssertNil(setup.controller.macroRunProgress)
+    }
+
+    func testForegroundCancellationStopsBeforeNextStepAndClearsProgress() async throws {
+        let waitGate = ContinuationGate()
+        let setup = await pairedController(
+            state: TVState(connected: true, power: true, endpoint: endpoint),
+            sleep: { _ in await waitGate.enterAndWait() }
+        )
+        let saved = try await setup.controller.createMacro(
+            name: "Cancel me",
+            actions: [
+                .key(.up, count: 1),
+                .wait(milliseconds: 2_000),
+                .key(.right, count: 1),
+            ]
+        )
+        let replay = Task { @MainActor in
+            try await setup.controller.runMacro(id: saved.id)
+        }
+        await waitGate.waitUntilEntered()
+
+        XCTAssertEqual(
+            setup.controller.macroRunProgress,
+            MacroRunProgress(
+                macroID: saved.id,
+                name: "Cancel me",
+                currentStep: 2,
+                totalSteps: 3,
+                action: .wait(milliseconds: 2_000)
+            )
+        )
+        setup.controller.cancelMacro()
+        await waitGate.release()
+
+        do {
+            _ = try await replay.value
+            XCTFail("Expected cancellation")
+        } catch is CancellationError {
+        } catch {
+            XCTFail("Expected CancellationError, got \(error)")
+        }
+        let events = await setup.client.events()
+        XCTAssertEqual(events, ["key:up:1"])
+        XCTAssertEqual(setup.controller.macros[0].usageCount, 0)
+        XCTAssertFalse(setup.controller.isRunningMacro)
+        XCTAssertNil(setup.controller.macroRunProgress)
     }
 
     func testWakeMACSaveIsAtomicAcrossSettingsAndPairedDevice() async throws {
@@ -372,11 +596,9 @@ final class RemoteControllerTests: XCTestCase, @unchecked Sendable {
         )
     }
 
-    private func savedCommand() -> SavedCommand {
-        SavedCommand(
-            label: "Mute",
-            systemImage: "speaker.slash.fill",
-            normalizedRequest: "mute",
+    private func savedMacro() -> SavedMacro {
+        SavedMacro(
+            name: "Mute",
             order: 0,
             usageCount: 1,
             createdAt: Date(timeIntervalSince1970: 100),
@@ -433,6 +655,7 @@ private actor RemoteClientFake: SmartCastControlling {
     private var stateCalls = 0
     private var quickStartError: VizioControlError?
     private var pressError: VizioControlError?
+    private var failingKey: TVKey?
     private var powerOnConnects = false
     private var getStateGate: ContinuationGate?
 
@@ -478,7 +701,7 @@ private actor RemoteClientFake: SmartCastControlling {
 
     func pressKey(_ key: TVKey, count: Int, timeout: Duration) async throws {
         log.append("key:\(key.rawValue):\(count)")
-        if let pressError { throw pressError }
+        if let pressError, failingKey == nil || failingKey == key { throw pressError }
         if key == .powerOn, powerOnConnects {
             state = TVState(connected: true, power: true, endpoint: endpoint)
         }
@@ -506,7 +729,10 @@ private actor RemoteClientFake: SmartCastControlling {
     func setStateSequence(_ values: [TVState]) { stateSequence = values }
     func setGetStateGate(_ gate: ContinuationGate?) { getStateGate = gate }
     func setQuickStartError(_ error: VizioControlError?) { quickStartError = error }
-    func setPressError(_ error: VizioControlError?) { pressError = error }
+    func setPressError(_ error: VizioControlError?, for key: TVKey? = nil) {
+        pressError = error
+        failingKey = key
+    }
     func setPowerOnConnects(_ value: Bool) { powerOnConnects = value }
     func events() -> [String] { log }
     func getStateCallCount() -> Int { stateCalls }
@@ -514,14 +740,18 @@ private actor RemoteClientFake: SmartCastControlling {
 
 private actor MemoryAppStore: AppStoring {
     private var data: StoreFile
-    private var deleted: SavedCommand?
+    private var deletedMacro: SavedMacro?
     private var failDeviceWrites = false
     private var failAtomicWrites = false
 
     init(_ data: StoreFile = StoreFile()) { self.data = data }
 
     func load() throws -> StoreFile { snapshot() }
-    func snapshot() -> StoreFile { data }
+    func snapshot() -> StoreFile {
+        var snapshot = data
+        snapshot.macros = orderedMacros()
+        return snapshot
+    }
     func updateSettings(_ settings: AppSettings) throws -> AppSettings {
         data.settings = settings
         return settings
@@ -535,68 +765,94 @@ private actor MemoryAppStore: AppStoring {
         if failDeviceWrites { throw VizioControlError.message("disk full") }
         data.device = device
     }
-    func command(id: UUID) -> SavedCommand? { data.commands.first { $0.id == id } }
-    func commands() -> [SavedCommand] { data.commands.sorted { $0.order < $1.order } }
-    func upsertCommand(_ command: SavedCommand) throws -> [SavedCommand] {
-        if let index = data.commands.firstIndex(where: { $0.id == command.id || $0.normalizedRequest == command.normalizedRequest }) {
-            var updated = command
-            updated.id = data.commands[index].id
-            updated.order = data.commands[index].order
-            updated.createdAt = data.commands[index].createdAt
-            updated.usageCount = data.commands[index].usageCount + 1
-            data.commands[index] = updated
-        } else {
-            var inserted = command
-            inserted.order = data.commands.count
-            inserted.usageCount = 1
-            data.commands.append(inserted)
+    func macros() -> [SavedMacro] { orderedMacros() }
+    func insertMacro(_ macro: SavedMacro) throws -> [SavedMacro] {
+        guard !data.macros.contains(where: { $0.id == macro.id }) else {
+            throw VizioControlError.message("Macro already exists.")
         }
-        return commands()
-    }
-    func editCommand(id: UUID, label: String, updatedAt: Date) throws -> [SavedCommand] {
-        guard let index = data.commands.firstIndex(where: { $0.id == id }) else { throw VizioControlError.message("missing") }
-        data.commands[index].label = label
-        data.commands[index].updatedAt = updatedAt
-        return commands()
-    }
-    func duplicateCommand(id: UUID, at date: Date) throws -> [SavedCommand] {
-        guard var copy = data.commands.first(where: { $0.id == id }) else { throw VizioControlError.message("missing") }
-        copy.id = UUID()
-        copy.label += " copy"
-        copy.normalizedRequest += "-copy-\(copy.id)"
-        copy.order = data.commands.count
-        copy.createdAt = date
-        copy.updatedAt = date
-        data.commands.append(copy)
-        return commands()
-    }
-    func deleteCommand(id: UUID) throws -> [SavedCommand] {
-        guard let index = data.commands.firstIndex(where: { $0.id == id }) else { return commands() }
-        deleted = data.commands.remove(at: index)
+        var inserted = macro
+        inserted.order = data.macros.count
+        inserted.usageCount = 0
+        data.macros.append(inserted)
         normalizeOrders()
-        return commands()
+        return orderedMacros()
     }
-    func undoDelete() throws -> [SavedCommand] {
-        if var deleted {
-            deleted.order = min(deleted.order, data.commands.count)
-            data.commands.insert(deleted, at: deleted.order)
-            self.deleted = nil
+    func updateMacro(
+        id: UUID,
+        name: String,
+        actions: [TVAction],
+        updatedAt: Date
+    ) throws -> [SavedMacro] {
+        guard let index = data.macros.firstIndex(where: { $0.id == id }) else {
+            throw VizioControlError.message("Saved macro not found.")
+        }
+        data.macros[index].name = name
+        data.macros[index].actions = actions
+        data.macros[index].updatedAt = updatedAt
+        return orderedMacros()
+    }
+    func recordMacroRun(id: UUID, at date: Date) throws -> [SavedMacro] {
+        guard let index = data.macros.firstIndex(where: { $0.id == id }) else {
+            throw VizioControlError.message("Saved macro not found.")
+        }
+        data.macros[index].usageCount += 1
+        data.macros[index].updatedAt = date
+        return orderedMacros()
+    }
+    func duplicateMacro(id: UUID, at date: Date) throws -> [SavedMacro] {
+        guard let source = data.macros.first(where: { $0.id == id }) else {
+            throw VizioControlError.message("Saved macro not found.")
+        }
+        let suffix = " copy"
+        let copy = SavedMacro(
+            name: String(source.name.prefix(40 - suffix.count)) + suffix,
+            order: data.macros.count,
+            usageCount: 0,
+            createdAt: date,
+            updatedAt: date,
+            actions: source.actions
+        )
+        data.macros.append(copy)
+        normalizeOrders()
+        return orderedMacros()
+    }
+    func deleteMacro(id: UUID) throws -> [SavedMacro] {
+        guard let index = data.macros.firstIndex(where: { $0.id == id }) else {
+            return orderedMacros()
+        }
+        deletedMacro = data.macros.remove(at: index)
+        normalizeOrders()
+        return orderedMacros()
+    }
+    func undoDeleteMacro() throws -> [SavedMacro] {
+        if var deletedMacro {
+            deletedMacro.order = min(deletedMacro.order, data.macros.count)
+            data.macros.insert(deletedMacro, at: deletedMacro.order)
+            self.deletedMacro = nil
             normalizeOrders()
         }
-        return commands()
+        return orderedMacros()
     }
-    func reorderCommand(id: UUID, direction: Int) throws -> [SavedCommand] {
-        guard let index = data.commands.firstIndex(where: { $0.id == id }) else { return commands() }
+    func reorderMacro(id: UUID, direction: Int) throws -> [SavedMacro] {
+        var ordered = orderedMacros()
+        guard let index = ordered.firstIndex(where: { $0.id == id }) else {
+            throw VizioControlError.message("Saved macro not found.")
+        }
         let target = index + direction
-        guard data.commands.indices.contains(target) else { return commands() }
-        data.commands.swapAt(index, target)
+        guard ordered.indices.contains(target) else { return ordered }
+        ordered.swapAt(index, target)
+        data.macros = ordered
         normalizeOrders()
-        return commands()
+        return orderedMacros()
     }
     func setFailDeviceWrites(_ value: Bool) { failDeviceWrites = value }
     func setFailAtomicWrites(_ value: Bool) { failAtomicWrites = value }
+    private func orderedMacros() -> [SavedMacro] {
+        data.macros.sorted { $0.order < $1.order }
+    }
     private func normalizeOrders() {
-        for index in data.commands.indices { data.commands[index].order = index }
+        data.macros = orderedMacros()
+        for index in data.macros.indices { data.macros[index].order = index }
     }
 }
 

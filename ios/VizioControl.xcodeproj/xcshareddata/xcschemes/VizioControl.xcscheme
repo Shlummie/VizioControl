@@ -41,6 +41,17 @@
                ReferencedContainer = "container:VizioControl.xcodeproj">
             </BuildableReference>
          </TestableReference>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "A10000000000000000000018"
+               BuildableName = "VizioControlUITests.xctest"
+               BlueprintName = "VizioControlUITests"
+               ReferencedContainer = "container:VizioControl.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
       </Testables>
    </TestAction>
    <LaunchAction

@@ -4,18 +4,18 @@ public struct StoreFile: Codable, Equatable, Sendable {
     public var version: Int
     public var settings: AppSettings
     public var device: PairedDevice?
-    public var commands: [SavedCommand]
+    public var macros: [SavedMacro]
 
     public init(
-        version: Int = 1,
+        version: Int = 2,
         settings: AppSettings = AppSettings(),
         device: PairedDevice? = nil,
-        commands: [SavedCommand] = []
+        macros: [SavedMacro] = []
     ) {
         self.version = version
         self.settings = settings
         self.device = device
-        self.commands = commands
+        self.macros = macros
     }
 }
 
@@ -25,14 +25,14 @@ public protocol AppStoring: Actor {
     func updateSettings(_ settings: AppSettings) throws -> AppSettings
     func updateSettingsAndDevice(settings: AppSettings, device: PairedDevice?) throws
     func setDevice(_ device: PairedDevice?) throws
-    func command(id: UUID) -> SavedCommand?
-    func commands() -> [SavedCommand]
-    func upsertCommand(_ command: SavedCommand) throws -> [SavedCommand]
-    func editCommand(id: UUID, label: String, updatedAt: Date) throws -> [SavedCommand]
-    func duplicateCommand(id: UUID, at date: Date) throws -> [SavedCommand]
-    func deleteCommand(id: UUID) throws -> [SavedCommand]
-    func undoDelete() throws -> [SavedCommand]
-    func reorderCommand(id: UUID, direction: Int) throws -> [SavedCommand]
+    func macros() -> [SavedMacro]
+    func insertMacro(_ macro: SavedMacro) throws -> [SavedMacro]
+    func updateMacro(id: UUID, name: String, actions: [TVAction], updatedAt: Date) throws -> [SavedMacro]
+    func recordMacroRun(id: UUID, at date: Date) throws -> [SavedMacro]
+    func duplicateMacro(id: UUID, at date: Date) throws -> [SavedMacro]
+    func deleteMacro(id: UUID) throws -> [SavedMacro]
+    func undoDeleteMacro() throws -> [SavedMacro]
+    func reorderMacro(id: UUID, direction: Int) throws -> [SavedMacro]
 }
 
 public actor AppStore: AppStoring {
@@ -45,7 +45,7 @@ public actor AppStore: AppStoring {
     private let directory: URL
     private let storeURL: URL
     private var data = StoreFile()
-    private var deletedCommand: SavedCommand?
+    private var deletedMacro: SavedMacro?
 
     public init(directory: URL = AppStore.applicationSupportDirectory) {
         self.directory = directory
@@ -60,7 +60,7 @@ public actor AppStore: AppStoring {
             storedData = try Data(contentsOf: storeURL)
         } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
             data = StoreFile()
-            deletedCommand = nil
+            deletedMacro = nil
             try persist()
             return snapshot()
         } catch {
@@ -68,24 +68,53 @@ public actor AppStore: AppStoring {
             return snapshot()
         }
 
-        let decoded: StoreFile
+        let version: Int
         do {
-            decoded = try decoder().decode(StoreFile.self, from: storedData)
-            guard decoded.version == 1 else { throw StoreError.unsupportedVersion }
+            version = try decoder().decode(StoreVersion.self, from: storedData).version
         } catch {
             try recoverCorruptFile()
             return snapshot()
         }
-        data = decoded
-        data.commands = normalizeOrder(data.commands)
-        deletedCommand = nil
-        if try encoder().encode(data) != storedData { try persist() }
-        return snapshot()
+
+        switch version {
+        case 1:
+            let legacy: LegacyStoreFile
+            do {
+                legacy = try decoder().decode(LegacyStoreFile.self, from: storedData)
+            } catch {
+                try recoverCorruptFile()
+                return snapshot()
+            }
+            data = StoreFile(
+                settings: legacy.settings,
+                device: legacy.device,
+                macros: normalizeOrder(legacy.legacyMacros.map(migrateLegacyRecord))
+            )
+            deletedMacro = nil
+            try persist()
+            return snapshot()
+        case 2:
+            let decoded: StoreFile
+            do {
+                decoded = try decoder().decode(StoreFile.self, from: storedData)
+            } catch {
+                try recoverCorruptFile()
+                return snapshot()
+            }
+            data = decoded
+            data.macros = normalizeOrder(data.macros)
+            deletedMacro = nil
+            if try encoder().encode(data) != storedData { try persist() }
+            return snapshot()
+        default:
+            try recoverCorruptFile()
+            return snapshot()
+        }
     }
 
     public func snapshot() -> StoreFile {
         var snapshot = data
-        snapshot.commands = sortedCommands(snapshot.commands)
+        snapshot.macros = sortedMacros(snapshot.macros)
         return snapshot
     }
 
@@ -106,138 +135,137 @@ public actor AppStore: AppStoring {
         try mutate { data.device = device }
     }
 
-    public func command(id: UUID) -> SavedCommand? {
-        data.commands.first { $0.id == id }
-    }
-
-    public func commands() -> [SavedCommand] {
-        sortedCommands(data.commands)
+    public func macros() -> [SavedMacro] {
+        sortedMacros(data.macros)
     }
 
     @discardableResult
-    public func upsertCommand(_ command: SavedCommand) throws -> [SavedCommand] {
-        try mutate {
-            if let index = data.commands.firstIndex(where: {
-                $0.id == command.id || $0.normalizedRequest == command.normalizedRequest
-            }) {
-                let existing = data.commands[index]
-                var updated = command
-                updated.id = existing.id
-                updated.order = existing.order
-                updated.createdAt = existing.createdAt
-                updated.usageCount = existing.usageCount + 1
-                data.commands[index] = updated
-            } else {
-                var inserted = command
-                inserted.order = data.commands.count
-                inserted.usageCount = 1
-                data.commands.append(inserted)
-            }
-            data.commands = normalizeOrder(data.commands)
-        }
-        return commands()
-    }
-
-    @discardableResult
-    public func editCommand(id: UUID, label: String, updatedAt: Date = Date()) throws -> [SavedCommand] {
-        guard let index = data.commands.firstIndex(where: { $0.id == id }) else {
-            throw VizioControlError.message("Saved command not found.")
-        }
-        let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            throw VizioControlError.message("Saved command label cannot be empty.")
+    public func insertMacro(_ macro: SavedMacro) throws -> [SavedMacro] {
+        guard !data.macros.contains(where: { $0.id == macro.id }) else {
+            throw VizioControlError.message("Macro already exists.")
         }
         try mutate {
-            data.commands[index].label = String(trimmed.prefix(40))
-            data.commands[index].updatedAt = updatedAt
+            var inserted = macro
+            inserted.order = data.macros.count
+            inserted.usageCount = 0
+            data.macros.append(inserted)
+            data.macros = normalizeOrder(data.macros)
         }
-        return commands()
+        return macros()
     }
 
     @discardableResult
-    public func duplicateCommand(id: UUID, at date: Date = Date()) throws -> [SavedCommand] {
-        guard let source = data.commands.first(where: { $0.id == id }) else {
-            throw VizioControlError.message("Saved command not found.")
+    public func updateMacro(
+        id: UUID,
+        name: String,
+        actions: [TVAction],
+        updatedAt: Date
+    ) throws -> [SavedMacro] {
+        guard let index = data.macros.firstIndex(where: { $0.id == id }) else {
+            throw VizioControlError.message("Saved macro not found.")
         }
-        let duplicateID = UUID()
-        let duplicate = SavedCommand(
-            id: duplicateID,
-            label: "\(source.label) copy",
-            systemImage: source.systemImage,
-            normalizedRequest: "\(source.normalizedRequest)-copy-\(duplicateID.uuidString.lowercased())",
-            order: data.commands.count,
+        try mutate {
+            data.macros[index].name = name
+            data.macros[index].actions = actions
+            data.macros[index].updatedAt = updatedAt
+        }
+        return macros()
+    }
+
+    @discardableResult
+    public func recordMacroRun(id: UUID, at date: Date) throws -> [SavedMacro] {
+        guard let index = data.macros.firstIndex(where: { $0.id == id }) else {
+            throw VizioControlError.message("Saved macro not found.")
+        }
+        try mutate {
+            data.macros[index].usageCount += 1
+            data.macros[index].updatedAt = date
+        }
+        return macros()
+    }
+
+    @discardableResult
+    public func duplicateMacro(id: UUID, at date: Date) throws -> [SavedMacro] {
+        guard let source = data.macros.first(where: { $0.id == id }) else {
+            throw VizioControlError.message("Saved macro not found.")
+        }
+        let suffix = " copy"
+        let sourceLimit = MacroConstraints.maximumNameLength - suffix.count
+        let duplicate = SavedMacro(
+            name: String(source.name.prefix(sourceLimit)) + suffix,
+            order: data.macros.count,
             usageCount: 0,
             createdAt: date,
             updatedAt: date,
             actions: source.actions
         )
         try mutate {
-            data.commands.append(duplicate)
-            data.commands = normalizeOrder(data.commands)
+            data.macros.append(duplicate)
+            data.macros = normalizeOrder(data.macros)
         }
-        return commands()
+        return macros()
     }
 
     @discardableResult
-    public func deleteCommand(id: UUID) throws -> [SavedCommand] {
-        guard let index = data.commands.firstIndex(where: { $0.id == id }) else { return commands() }
+    public func deleteMacro(id: UUID) throws -> [SavedMacro] {
+        guard let index = data.macros.firstIndex(where: { $0.id == id }) else { return macros() }
         try mutate {
-            deletedCommand = data.commands.remove(at: index)
-            data.commands = normalizeOrder(data.commands)
+            deletedMacro = data.macros.remove(at: index)
+            data.macros = normalizeOrder(data.macros)
         }
-        return commands()
+        return macros()
     }
 
     @discardableResult
-    public func undoDelete() throws -> [SavedCommand] {
-        guard let deletedCommand else { return commands() }
-        let insertionOrder = max(0, min(deletedCommand.order, data.commands.count))
+    public func undoDeleteMacro() throws -> [SavedMacro] {
+        guard let deletedMacro else { return macros() }
+        let insertionOrder = max(0, min(deletedMacro.order, data.macros.count))
         try mutate {
-            for index in data.commands.indices where data.commands[index].order >= insertionOrder {
-                data.commands[index].order += 1
+            for index in data.macros.indices where data.macros[index].order >= insertionOrder {
+                data.macros[index].order += 1
             }
-            var restored = deletedCommand
+            var restored = deletedMacro
             restored.order = insertionOrder
-            data.commands.append(restored)
-            self.deletedCommand = nil
-            data.commands = normalizeOrder(data.commands)
+            data.macros.append(restored)
+            self.deletedMacro = nil
+            data.macros = normalizeOrder(data.macros)
         }
-        return commands()
+        return macros()
     }
 
     @discardableResult
-    public func reorderCommand(id: UUID, direction: Int) throws -> [SavedCommand] {
-        guard direction == -1 || direction == 1 else { return commands() }
-        var ordered = sortedCommands(data.commands)
+    public func reorderMacro(id: UUID, direction: Int) throws -> [SavedMacro] {
+        guard direction == -1 || direction == 1 else { return macros() }
+        var ordered = sortedMacros(data.macros)
         guard let index = ordered.firstIndex(where: { $0.id == id }) else {
-            throw VizioControlError.message("Saved command not found.")
+            throw VizioControlError.message("Saved macro not found.")
         }
         let target = index + direction
         guard ordered.indices.contains(target) else { return ordered }
         try mutate {
             ordered.swapAt(index, target)
             for position in ordered.indices { ordered[position].order = position }
-            data.commands = ordered
+            data.macros = ordered
         }
-        return commands()
+        return macros()
     }
 
     private func mutate(_ operation: () throws -> Void) throws {
         let previousData = data
-        let previousDeletedCommand = deletedCommand
+        let previousDeletedMacro = deletedMacro
         do {
             try operation()
             try persist()
         } catch {
             data = previousData
-            deletedCommand = previousDeletedCommand
+            deletedMacro = previousDeletedMacro
             throw error
         }
     }
 
     private func persist() throws {
-        data.version = 1
-        data.commands = normalizeOrder(data.commands)
+        data.version = 2
+        data.macros = normalizeOrder(data.macros)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         try encoder().encode(data).write(to: storeURL, options: .atomic)
     }
@@ -249,7 +277,7 @@ public actor AppStore: AppStoring {
             try FileManager.default.moveItem(at: storeURL, to: corruptURL)
         }
         data = StoreFile()
-        deletedCommand = nil
+        deletedMacro = nil
         try persist()
     }
 
@@ -266,16 +294,32 @@ public actor AppStore: AppStoring {
         return decoder
     }
 
-    private func normalizeOrder(_ commands: [SavedCommand]) -> [SavedCommand] {
-        sortedCommands(commands).enumerated().map { order, command in
-            var command = command
-            command.order = order
-            return command
+    private func migrateLegacyRecord(_ record: LegacyMacroRecord) -> SavedMacro {
+        let trimmedName = record.label.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = trimmedName.isEmpty ? "Saved macro" : String(
+            trimmedName.prefix(MacroConstraints.maximumNameLength)
+        )
+        return SavedMacro(
+            id: record.id,
+            name: name,
+            order: record.order,
+            usageCount: record.usageCount,
+            createdAt: record.createdAt,
+            updatedAt: record.updatedAt,
+            actions: record.actions
+        )
+    }
+
+    private func normalizeOrder(_ macros: [SavedMacro]) -> [SavedMacro] {
+        sortedMacros(macros).enumerated().map { order, macro in
+            var macro = macro
+            macro.order = order
+            return macro
         }
     }
 
-    private func sortedCommands(_ commands: [SavedCommand]) -> [SavedCommand] {
-        commands.sorted {
+    private func sortedMacros(_ macros: [SavedMacro]) -> [SavedMacro] {
+        macros.sorted {
             if $0.order != $1.order { return $0.order < $1.order }
             if $0.createdAt != $1.createdAt { return $0.createdAt < $1.createdAt }
             return $0.id.uuidString < $1.id.uuidString
@@ -283,6 +327,32 @@ public actor AppStore: AppStoring {
     }
 }
 
-private enum StoreError: Error {
-    case unsupportedVersion
+private struct StoreVersion: Decodable {
+    let version: Int
+}
+
+private struct LegacyStoreFile: Decodable {
+    let version: Int
+    let settings: AppSettings
+    let device: PairedDevice?
+    let legacyMacros: [LegacyMacroRecord]
+
+    private enum CodingKeys: String, CodingKey {
+        case version
+        case settings
+        case device
+        case legacyMacros = "commands"
+    }
+}
+
+private struct LegacyMacroRecord: Decodable {
+    let id: UUID
+    let label: String
+    let systemImage: String
+    let normalizedRequest: String
+    let order: Int
+    let usageCount: Int
+    let createdAt: Date
+    let updatedAt: Date
+    let actions: [TVAction]
 }

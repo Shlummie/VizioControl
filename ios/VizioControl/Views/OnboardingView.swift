@@ -262,7 +262,6 @@ private struct PairingPINView: View {
                         controller.cancelPairing()
                         dismiss()
                     }
-                    .minimumControlSize()
                 }
             }
         }

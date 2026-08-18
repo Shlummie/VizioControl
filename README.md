@@ -10,7 +10,7 @@ VizioControl is a local-first controller for compatible Vizio SmartCast TVs. The
 - Provides power, volume, mute, input, navigation, text-entry, and app-launch controls without requiring AI.
 - Verifies Quick Start before network standby and fails closed when wakeability cannot be confirmed.
 - Turns verified TV-setting requests into local macros that replay without a model or screenshots.
-- Includes a native iPhone remote with PIN pairing, Keychain-protected credentials, full broadcast Wake-on-LAN, deterministic typed commands, and editable saved local commands.
+- Includes a native iPhone remote with PIN pairing, Keychain-protected credentials, full broadcast Wake-on-LAN, and a dedicated swipeable Macros tab with ordered actions, explicit waits, bounded definitions, current-step progress, and foreground cancellation.
 - Streams compatible SmartCast Chromium surfaces to an optional in-memory viewport at up to 24 FPS.
 - Runs optional visual navigation in a fresh, time-bounded Luna session with only host-validated `tv_*` tools.
 - Requires confirmation for purchases, rentals, subscriptions, account changes, and destructive actions.

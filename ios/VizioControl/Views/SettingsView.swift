@@ -34,7 +34,6 @@ struct SettingsView: View {
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }
-                        .minimumControlSize()
                 }
             }
         }
@@ -63,7 +62,7 @@ struct SettingsView: View {
             }
             Button("Cancel", role: .cancel) { }
         } message: {
-            Text("The paired TV metadata and protected Keychain token will be erased. Saved local commands remain on this iPhone.")
+            Text("The paired TV metadata and protected Keychain token will be erased. Saved macros remain on this iPhone.")
         }
     }
 
@@ -178,7 +177,7 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 12) {
             SectionHeading(
                 title: "Forget TV",
-                detail: "This erases paired TV metadata and its protected local token. Saved local command cards remain."
+                detail: "This erases paired TV metadata and its protected local token. Saved macro cards remain."
             )
             Button {
                 confirmForget = true

@@ -31,6 +31,7 @@ public enum TVAction: Codable, Equatable, Sendable {
     case key(TVKey, count: Int)
     case setVolume(Int)
     case launchApp(String)
+    case wait(milliseconds: Int)
 }
 
 public enum DiscoverySource: String, Codable, Sendable {
@@ -167,11 +168,9 @@ public struct AppSettings: Codable, Equatable, Sendable {
     }
 }
 
-public struct SavedCommand: Codable, Equatable, Identifiable, Sendable {
+public struct SavedMacro: Codable, Equatable, Identifiable, Sendable {
     public var id: UUID
-    public var label: String
-    public var systemImage: String
-    public var normalizedRequest: String
+    public var name: String
     public var order: Int
     public var usageCount: Int
     public var createdAt: Date
@@ -180,9 +179,7 @@ public struct SavedCommand: Codable, Equatable, Identifiable, Sendable {
 
     public init(
         id: UUID = UUID(),
-        label: String,
-        systemImage: String,
-        normalizedRequest: String,
+        name: String,
         order: Int,
         usageCount: Int,
         createdAt: Date,
@@ -190,9 +187,7 @@ public struct SavedCommand: Codable, Equatable, Identifiable, Sendable {
         actions: [TVAction]
     ) {
         self.id = id
-        self.label = label
-        self.systemImage = systemImage
-        self.normalizedRequest = normalizedRequest
+        self.name = name
         self.order = order
         self.usageCount = usageCount
         self.createdAt = createdAt

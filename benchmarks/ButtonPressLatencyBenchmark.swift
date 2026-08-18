@@ -115,37 +115,19 @@ private actor BenchmarkStore: AppStoring {
         file.device = device
     }
 
-    func command(id: UUID) -> SavedCommand? {
-        file.commands.first { $0.id == id }
-    }
-
-    func commands() -> [SavedCommand] { file.commands }
-
-    func upsertCommand(_ command: SavedCommand) throws -> [SavedCommand] {
-        if let index = file.commands.firstIndex(where: { $0.id == command.id }) {
-            file.commands[index] = command
-        } else {
-            file.commands.append(command)
-        }
-        return file.commands
-    }
-
-    func editCommand(id: UUID, label: String, updatedAt: Date) throws -> [SavedCommand] {
-        guard let index = file.commands.firstIndex(where: { $0.id == id }) else { return file.commands }
-        file.commands[index].label = label
-        file.commands[index].updatedAt = updatedAt
-        return file.commands
-    }
-
-    func duplicateCommand(id: UUID, at date: Date) throws -> [SavedCommand] { file.commands }
-
-    func deleteCommand(id: UUID) throws -> [SavedCommand] {
-        file.commands.removeAll { $0.id == id }
-        return file.commands
-    }
-
-    func undoDelete() throws -> [SavedCommand] { file.commands }
-    func reorderCommand(id: UUID, direction: Int) throws -> [SavedCommand] { file.commands }
+    func macros() -> [SavedMacro] { file.macros }
+    func insertMacro(_ macro: SavedMacro) throws -> [SavedMacro] { file.macros }
+    func updateMacro(
+        id: UUID,
+        name: String,
+        actions: [TVAction],
+        updatedAt: Date
+    ) throws -> [SavedMacro] { file.macros }
+    func recordMacroRun(id: UUID, at date: Date) throws -> [SavedMacro] { file.macros }
+    func duplicateMacro(id: UUID, at date: Date) throws -> [SavedMacro] { file.macros }
+    func deleteMacro(id: UUID) throws -> [SavedMacro] { file.macros }
+    func undoDeleteMacro() throws -> [SavedMacro] { file.macros }
+    func reorderMacro(id: UUID, direction: Int) throws -> [SavedMacro] { file.macros }
 }
 
 private struct BenchmarkTokenStore: TokenStoring {

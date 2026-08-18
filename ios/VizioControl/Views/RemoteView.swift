@@ -1,13 +1,19 @@
 import SwiftUI
 
+private enum RemotePage: Hashable {
+    case remote
+    case macros
+}
+
 struct RemoteView: View {
     @Bindable var controller: RemoteController
     @State private var showSettings = false
+    @State private var selectedPage: RemotePage = .remote
     @State private var tvText = ""
-    @State private var commandRequest = ""
     @State private var volume = 0.0
     @State private var isSettingVolume = false
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private let navigationColumns = [GridItem(.adaptive(minimum: 88), spacing: 9)]
     private let playbackColumns = [GridItem(.adaptive(minimum: 68), spacing: 9)]
@@ -15,25 +21,16 @@ struct RemoteView: View {
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(spacing: 16) {
-                    statusPanel
-                    powerPanel
-                    navigationPanel
-                    dPadPanel
-                    playbackPanel
-                    volumePanel
-                    appsPanel
-                    textPanel
-                    commandPanel
-                    SavedCommandsView(controller: controller)
-                }
-                .padding(.horizontal, 16)
-                .padding(.bottom, 28)
-                .frame(maxWidth: 760)
-                .frame(maxWidth: .infinity)
+            TabView(selection: $selectedPage) {
+                remotePage
+                    .tag(RemotePage.remote)
+                macrosPage
+                    .tag(RemotePage.macros)
             }
-            .scrollDismissesKeyboard(.interactively)
+            .tabViewStyle(.page(indexDisplayMode: .never))
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                pageTabs
+            }
             .background(Color.vizioGround.ignoresSafeArea())
             .navigationTitle("VizioControl")
             .navigationBarTitleDisplayMode(.inline)
@@ -55,6 +52,98 @@ struct RemoteView: View {
         }
         .onAppear(perform: synchronizeVolume)
         .onChange(of: controller.tvState.volume) { _, _ in synchronizeVolume() }
+    }
+
+    private var remotePage: some View {
+        ScrollView {
+            VStack(spacing: 16) {
+                statusPanel
+                Group {
+                    powerPanel
+                    navigationPanel
+                    dPadPanel
+                    playbackPanel
+                    volumePanel
+                    appsPanel
+                    textPanel
+                }
+                .disabled(controller.isRunningMacro)
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 28)
+            .frame(maxWidth: 760)
+            .frame(maxWidth: .infinity)
+        }
+        .scrollDismissesKeyboard(.interactively)
+        .background(Color.vizioGround.ignoresSafeArea())
+        .accessibilityIdentifier("remote.page.controls")
+    }
+
+    private var macrosPage: some View {
+        ScrollView {
+            MacrosView(controller: controller)
+                .padding(.horizontal, 16)
+                .padding(.bottom, 28)
+                .frame(maxWidth: 760)
+                .frame(maxWidth: .infinity)
+        }
+        .background(Color.vizioGround.ignoresSafeArea())
+        .accessibilityIdentifier("remote.page.macros")
+    }
+
+    private var pageTabs: some View {
+        HStack(spacing: 8) {
+            pageTab(
+                .remote,
+                title: "Remote",
+                systemImage: "dpad.fill",
+                accessibilityHint: "Shows TV remote controls"
+            )
+            pageTab(
+                .macros,
+                title: "Macros",
+                systemImage: "rectangle.stack.fill",
+                accessibilityHint: "Shows saved macro buttons"
+            )
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(Color.vizioSurface)
+        .overlay(alignment: .top) {
+            Color.vizioRaised.frame(height: 1)
+        }
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: selectedPage)
+    }
+
+    private func pageTab(
+        _ page: RemotePage,
+        title: String,
+        systemImage: String,
+        accessibilityHint: String
+    ) -> some View {
+        let isSelected = selectedPage == page
+        return Button {
+            if reduceMotion {
+                selectedPage = page
+            } else {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    selectedPage = page
+                }
+            }
+        } label: {
+            Label(title, systemImage: systemImage)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(isSelected ? Color.vizioMossStrong : Color.vizioMuted)
+                .frame(maxWidth: .infinity, minHeight: 44)
+                .background(isSelected ? Color.vizioRaised : Color.clear)
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(title) tab")
+        .accessibilityHint(accessibilityHint)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+        .accessibilityIdentifier(page == .remote ? "remote.tab.remote" : "remote.tab.macros")
     }
 
     private var statusPanel: some View {
@@ -246,30 +335,6 @@ struct RemoteView: View {
         .vizioPanel()
     }
 
-    private var commandPanel: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            SectionHeading(
-                title: "Local command",
-                detail: "Try “mute”, “set volume to 20”, “open Hulu”, or “volume down twice”. Commands run locally without AI."
-            )
-            TextField("Type a TV command", text: $commandRequest)
-                .vizioField()
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .submitLabel(.go)
-                .onSubmit(runCommand)
-                .accessibilityLabel("Local TV command")
-            AsyncActionButton(
-                title: "Run and Save",
-                systemImage: "play.circle.fill",
-                kind: .primary,
-                disabled: commandRequest.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                accessibilityHint: "Runs a supported local command and saves it only when successful",
-                action: runCommandAction
-            )
-        }
-        .vizioPanel()
-    }
 
     private func remoteKey(_ title: String, image: String, key: TVKey, symbolOnly: Bool = false) -> some View {
         AsyncActionButton(
@@ -370,16 +435,4 @@ struct RemoteView: View {
         if tvText == value { tvText = "" }
     }
 
-    private func runCommand() {
-        guard !commandRequest.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        Task { @MainActor in
-            do { try await runCommandAction() } catch { }
-        }
-    }
-
-    private func runCommandAction() async throws {
-        let request = commandRequest
-        _ = try await controller.runLocalRequest(request)
-        if commandRequest == request { commandRequest = "" }
-    }
 }

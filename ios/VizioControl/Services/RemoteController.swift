@@ -9,6 +9,28 @@ public typealias SmartCastClientFactory = @Sendable (
     String?
 ) -> any SmartCastControlling
 
+public struct MacroRunProgress: Equatable, Sendable {
+    public let macroID: UUID?
+    public let name: String
+    public let currentStep: Int
+    public let totalSteps: Int
+    public let action: TVAction
+
+    public init(
+        macroID: UUID?,
+        name: String,
+        currentStep: Int,
+        totalSteps: Int,
+        action: TVAction
+    ) {
+        self.macroID = macroID
+        self.name = name
+        self.currentStep = currentStep
+        self.totalSteps = totalSteps
+        self.action = action
+    }
+}
+
 @MainActor
 @Observable
 public final class RemoteController {
@@ -23,10 +45,12 @@ public final class RemoteController {
     public private(set) var pairing: PairingStart?
     public private(set) var isPairing = false
     public private(set) var isWaking = false
+    public private(set) var isRunningMacro = false
+    public private(set) var macroRunProgress: MacroRunProgress?
     public private(set) var pairedDevice: PairedDevice?
     public private(set) var tvState = TVState()
     public private(set) var settings = AppSettings()
-    public private(set) var commands: [SavedCommand] = []
+    public private(set) var macros: [SavedMacro] = []
     public private(set) var errorBanner: String?
     public private(set) var successStatus: String?
 
@@ -35,7 +59,7 @@ public final class RemoteController {
     @ObservationIgnored private let discovery: any DeviceDiscovering
     @ObservationIgnored private let clientFactory: SmartCastClientFactory
     @ObservationIgnored private let catalog: any AppCataloging
-    @ObservationIgnored private let parser: any RequestParsing
+    @ObservationIgnored private let macroValidator: MacroDefinitionValidator
     @ObservationIgnored private let wakeSender: any WakeOnLANSending
     @ObservationIgnored private let monotonicNow: @Sendable () -> ContinuousClock.Instant
     @ObservationIgnored private let sleep: @Sendable (Duration) async -> Void
@@ -46,9 +70,10 @@ public final class RemoteController {
     @ObservationIgnored private var discoveryGeneration: UUID?
     @ObservationIgnored private var refreshContext: (id: UUID, task: Task<TVState, Never>)?
     @ObservationIgnored private var pollingTimer: DispatchSourceTimer?
-    @ObservationIgnored private var postCommandRefreshWorkItem: DispatchWorkItem?
+    @ObservationIgnored private var postControlRefreshWorkItem: DispatchWorkItem?
     @ObservationIgnored private var nextControlID: UInt64 = 0
     @ObservationIgnored private var controlCancellations: [UInt64: () -> Void] = [:]
+    @ObservationIgnored private var macroControlID: UInt64?
     @ObservationIgnored private var sceneActivity: AppSceneActivity = .active
 
     public init(
@@ -57,7 +82,6 @@ public final class RemoteController {
         discovery: any DeviceDiscovering = DiscoveryService(),
         clientFactory: @escaping SmartCastClientFactory = RemoteController.productionClientFactory,
         catalog: any AppCataloging = AppCatalog(),
-        parser: (any RequestParsing)? = nil,
         wakeSender: any WakeOnLANSending = WakeOnLANService(),
         monotonicNow: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock().now },
         sleep: @escaping @Sendable (Duration) async -> Void = {
@@ -69,7 +93,7 @@ public final class RemoteController {
         self.discovery = discovery
         self.clientFactory = clientFactory
         self.catalog = catalog
-        self.parser = parser ?? RequestParser(catalog: catalog)
+        self.macroValidator = MacroDefinitionValidator(catalog: catalog)
         self.wakeSender = wakeSender
         self.monotonicNow = monotonicNow
         self.sleep = sleep
@@ -81,7 +105,7 @@ public final class RemoteController {
         do {
             let snapshot = try await store.load()
             settings = snapshot.settings
-            commands = snapshot.commands
+            macros = snapshot.macros
             guard let device = snapshot.device else {
                 try await keychain.deleteAll()
                 pairedDevice = nil
@@ -262,7 +286,7 @@ public final class RemoteController {
             self.pairing = nil
             self.pairedDevice = nil
             self.tvState = TVState()
-            self.successStatus = "TV pairing erased. Saved local commands were kept."
+            self.successStatus = "TV pairing erased. Saved macros were kept."
         }
     }
 
@@ -281,35 +305,22 @@ public final class RemoteController {
     @discardableResult
     public func press(_ key: TVKey, count: Int = 1) async throws -> TVState {
         try await performUserOperation {
-            try await self.pressUntracked(key, count: count)
+            try self.requireManualControlAvailability()
+            return try await self.pressUntracked(key, count: count)
         }
     }
 
     @discardableResult
     public func setVolume(_ value: Double) async throws -> TVState {
         try await performUserOperation {
-            guard let client = self.client else { throw VizioControlError.missingPairingToken }
-            let state = try await self.connectedControlState()
-            guard state.power != false else {
-                throw VizioControlError.message("TV is off. Turn it on before changing volume.")
-            }
-            let sent = try await client.setVolume(value)
-            self.tvState = TVState(
-                connected: state.connected,
-                power: state.power,
-                volume: sent,
-                muted: false,
-                currentApp: state.currentApp,
-                endpoint: state.endpoint,
-                error: nil
-            )
-            self.scheduleRefresh(after: .milliseconds(250))
-            return self.tvState
+            try self.requireManualControlAvailability()
+            return try await self.setVolumeUntracked(value)
         }
     }
 
     public func sendText(_ value: String) async throws {
         try await performUserOperation {
+            try self.requireManualControlAvailability()
             guard let client = self.client else { throw VizioControlError.missingPairingToken }
             let state = try await self.connectedControlState()
             guard state.power != false else {
@@ -322,91 +333,114 @@ public final class RemoteController {
 
     public func launchApp(_ name: String) async throws {
         try await performUserOperation {
-            guard let client = self.client else { throw VizioControlError.missingPairingToken }
-            let state = try await self.connectedControlState()
-            guard state.power != false else {
-                throw VizioControlError.message("TV is off. Turn it on before opening an app.")
-            }
-            let app = try self.catalog.resolve(name)
-            try await client.launchApp(app)
-            self.tvState.currentApp = app.name
-            self.successStatus = "Opened \(app.name)."
-            self.scheduleRefresh(after: .milliseconds(1_200))
+            try self.requireManualControlAvailability()
+            let launchedName = try await self.launchAppUntracked(name)
+            self.successStatus = "Opened \(launchedName)."
         }
     }
 
     @discardableResult
-    public func runLocalRequest(_ request: String) async throws -> SavedCommand {
+    public func createMacro(name: String, actions: [TVAction]) async throws -> SavedMacro {
         try await performUserOperation {
-            _ = try self.requireDevice()
-            let parsed = try self.parser.parse(request)
-            try await self.runActions(parsed.actions)
+            let definition = try self.macroValidator.validate(name: name, actions: actions)
             let now = Date()
-            let newCommand = SavedCommand(
-                label: parsed.label,
-                systemImage: parsed.systemImage,
-                normalizedRequest: parsed.normalizedRequest,
-                order: self.commands.count,
-                usageCount: 1,
+            let macro = SavedMacro(
+                name: definition.name,
+                order: self.macros.count,
+                usageCount: 0,
                 createdAt: now,
                 updatedAt: now,
-                actions: parsed.actions
+                actions: definition.actions
             )
-            self.commands = try await self.store.upsertCommand(newCommand)
-            let saved = self.commands.first { $0.normalizedRequest == parsed.normalizedRequest }!
-            self.successStatus = "\(saved.label) completed and saved."
+            self.macros = try await self.store.insertMacro(macro)
+            guard let saved = self.macros.first(where: { $0.id == macro.id }) else {
+                throw VizioControlError.message("Saved macro not found.")
+            }
+            self.successStatus = "\(saved.name) saved."
             return saved
         }
     }
 
     @discardableResult
-    public func runSavedCommand(id: UUID) async throws -> SavedCommand {
+    public func updateMacro(id: UUID, name: String, actions: [TVAction]) async throws -> SavedMacro {
         try await performUserOperation {
-            guard let command = self.commands.first(where: { $0.id == id }) else {
-                throw VizioControlError.message("Saved command not found.")
+            let definition = try self.macroValidator.validate(name: name, actions: actions)
+            self.macros = try await self.store.updateMacro(
+                id: id,
+                name: definition.name,
+                actions: definition.actions,
+                updatedAt: Date()
+            )
+            guard let saved = self.macros.first(where: { $0.id == id }) else {
+                throw VizioControlError.message("Saved macro not found.")
             }
-            try await self.runActions(command.actions)
-            var updated = command
-            updated.updatedAt = Date()
-            self.commands = try await self.store.upsertCommand(updated)
-            let saved = self.commands.first { $0.id == id }!
-            self.successStatus = "\(saved.label) completed."
+            self.successStatus = "\(saved.name) updated."
             return saved
         }
     }
 
-    public func editCommand(id: UUID, label: String) async throws {
-        try await performUserOperation {
-            self.commands = try await self.store.editCommand(id: id, label: label, updatedAt: Date())
-            self.successStatus = "Saved command label updated."
+    public func testMacro(name: String, actions: [TVAction]) async throws {
+        try beginMacroOperation()
+        defer { finishMacroOperation() }
+        try await performUserOperation(isMacroOperation: true) {
+            let definition = try self.macroValidator.validate(name: name, actions: actions)
+            try await self.runActions(
+                definition.actions,
+                macroID: nil,
+                name: definition.name
+            )
+            self.successStatus = "\(definition.name) test completed."
         }
     }
 
-    public func duplicateCommand(id: UUID) async throws {
-        try await performUserOperation {
-            self.commands = try await self.store.duplicateCommand(id: id, at: Date())
-            self.successStatus = "Saved command duplicated."
+    @discardableResult
+    public func runMacro(id: UUID) async throws -> SavedMacro {
+        try beginMacroOperation()
+        defer { finishMacroOperation() }
+        return try await performUserOperation(isMacroOperation: true) {
+            guard let macro = self.macros.first(where: { $0.id == id }) else {
+                throw VizioControlError.message("Saved macro not found.")
+            }
+            let definition = try self.macroValidator.validate(name: macro.name, actions: macro.actions)
+            try await self.runActions(
+                definition.actions,
+                macroID: id,
+                name: definition.name
+            )
+            self.macros = try await self.store.recordMacroRun(id: id, at: Date())
+            guard let saved = self.macros.first(where: { $0.id == id }) else {
+                throw VizioControlError.message("Saved macro not found.")
+            }
+            self.successStatus = "\(saved.name) completed."
+            return saved
         }
     }
 
-    public func deleteCommand(id: UUID) async throws {
+    public func duplicateMacro(id: UUID) async throws {
         try await performUserOperation {
-            self.commands = try await self.store.deleteCommand(id: id)
-            self.successStatus = "Saved command deleted."
+            self.macros = try await self.store.duplicateMacro(id: id, at: Date())
+            self.successStatus = "Macro duplicated."
         }
     }
 
-    public func undoDeleteCommand() async throws {
+    public func deleteMacro(id: UUID) async throws {
         try await performUserOperation {
-            self.commands = try await self.store.undoDelete()
-            self.successStatus = "Saved command restored."
+            self.macros = try await self.store.deleteMacro(id: id)
+            self.successStatus = "Macro deleted."
         }
     }
 
-    public func reorderCommand(id: UUID, direction: Int) async throws {
+    public func undoDeleteMacro() async throws {
         try await performUserOperation {
-            self.commands = try await self.store.reorderCommand(id: id, direction: direction)
-            self.successStatus = "Saved command moved."
+            self.macros = try await self.store.undoDeleteMacro()
+            self.successStatus = "Macro restored."
+        }
+    }
+
+    public func reorderMacro(id: UUID, direction: Int) async throws {
+        try await performUserOperation {
+            self.macros = try await self.store.reorderMacro(id: id, direction: direction)
+            self.successStatus = "Macro moved."
         }
     }
 
@@ -461,6 +495,11 @@ public final class RemoteController {
             }
             startPolling()
         }
+    }
+
+    public func cancelMacro() {
+        guard let macroControlID else { return }
+        controlCancellations[macroControlID]?()
     }
 
     public func dismissError() {
@@ -549,6 +588,39 @@ public final class RemoteController {
         return state
     }
 
+    private func setVolumeUntracked(_ value: Double) async throws -> TVState {
+        guard let client else { throw VizioControlError.missingPairingToken }
+        let state = try await connectedControlState()
+        guard state.power != false else {
+            throw VizioControlError.message("TV is off. Turn it on before changing volume.")
+        }
+        let sent = try await client.setVolume(value)
+        tvState = TVState(
+            connected: state.connected,
+            power: state.power,
+            volume: sent,
+            muted: false,
+            currentApp: state.currentApp,
+            endpoint: state.endpoint,
+            error: nil
+        )
+        scheduleRefresh(after: .milliseconds(250))
+        return tvState
+    }
+
+    private func launchAppUntracked(_ name: String) async throws -> String {
+        guard let client else { throw VizioControlError.missingPairingToken }
+        let state = try await connectedControlState()
+        guard state.power != false else {
+            throw VizioControlError.message("TV is off. Turn it on before opening an app.")
+        }
+        let app = try catalog.resolve(name)
+        try await client.launchApp(app)
+        tvState.currentApp = app.name
+        scheduleRefresh(after: .milliseconds(1_200))
+        return app.name
+    }
+
     private func connectedControlState() async throws -> TVState {
         let state = tvState.connected ? tvState : await refreshTVState()
         guard state.connected else { throw VizioControlError.offline(state.error) }
@@ -583,16 +655,57 @@ public final class RemoteController {
         throw VizioControlError.message(Self.wakeTimeoutMessage)
     }
 
-    private func runActions(_ actions: [TVAction]) async throws {
-        for action in actions {
+    private func runActions(
+        _ actions: [TVAction],
+        macroID: UUID?,
+        name: String
+    ) async throws {
+        for (index, action) in actions.enumerated() {
+            try Task.checkCancellation()
+            macroRunProgress = MacroRunProgress(
+                macroID: macroID,
+                name: name,
+                currentStep: index + 1,
+                totalSteps: actions.count,
+                action: action
+            )
             switch action {
-            case let .key(key, count): _ = try await pressUntracked(key, count: count)
-            case let .setVolume(value): _ = try await setVolume(Double(value))
-            case let .launchApp(name): try await launchApp(name)
+            case let .key(key, count):
+                _ = try await pressUntracked(key, count: count)
+            case let .setVolume(value):
+                _ = try await setVolumeUntracked(Double(value))
+            case let .launchApp(name):
+                _ = try await launchAppUntracked(name)
+            case let .wait(milliseconds):
+                try Task.checkCancellation()
+                await sleep(.milliseconds(milliseconds))
+                try Task.checkCancellation()
             }
+            try Task.checkCancellation()
         }
+        macroRunProgress = nil
     }
 
+    private func beginMacroOperation() throws {
+        guard !isRunningMacro else {
+            let error = VizioControlError.message("Another macro is already running.")
+            publish(error)
+            throw error
+        }
+        isRunningMacro = true
+        successStatus = nil
+    }
+
+    private func finishMacroOperation() {
+        isRunningMacro = false
+        macroRunProgress = nil
+    }
+
+    private func requireManualControlAvailability() throws {
+        guard !isRunningMacro else {
+            throw VizioControlError.message("Wait for the running macro to finish.")
+        }
+    }
     private func requireDevice() throws -> PairedDevice {
         guard let pairedDevice else { throw VizioControlError.missingPairingToken }
         return pairedDevice
@@ -608,15 +721,15 @@ public final class RemoteController {
     }
 
     private func scheduleRefresh(after delay: Duration) {
-        postCommandRefreshWorkItem?.cancel()
+        postControlRefreshWorkItem?.cancel()
         let workItem = DispatchWorkItem { [weak self] in
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                self.postCommandRefreshWorkItem = nil
+                self.postControlRefreshWorkItem = nil
                 _ = await self.refreshTVState()
             }
         }
-        postCommandRefreshWorkItem = workItem
+        postControlRefreshWorkItem = workItem
         DispatchQueue.main.asyncAfter(
             deadline: .now() + durationSeconds(delay),
             execute: workItem
@@ -642,8 +755,8 @@ public final class RemoteController {
     private func stopOperationalTasks() {
         pollingTimer?.cancel()
         pollingTimer = nil
-        postCommandRefreshWorkItem?.cancel()
-        postCommandRefreshWorkItem = nil
+        postControlRefreshWorkItem?.cancel()
+        postControlRefreshWorkItem = nil
         refreshContext?.task.cancel()
         refreshContext = nil
         let cancellations = controlCancellations.values
@@ -652,6 +765,7 @@ public final class RemoteController {
     }
 
     private func performUserOperation<Value: Sendable>(
+        isMacroOperation: Bool = false,
         _ operation: @escaping @MainActor () async throws -> Value
     ) async throws -> Value {
         let id = nextControlID
@@ -663,7 +777,11 @@ public final class RemoteController {
             task = Task { @MainActor in try await operation() }
         }
         controlCancellations[id] = { task.cancel() }
-        defer { controlCancellations[id] = nil }
+        if isMacroOperation { macroControlID = id }
+        defer {
+            controlCancellations[id] = nil
+            if macroControlID == id { macroControlID = nil }
+        }
         do {
             return try await task.value
         } catch {
